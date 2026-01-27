@@ -11,6 +11,11 @@ struct AntigravityProviderImplementation: ProviderImplementation {
     }
 
     @MainActor
+    func settingsSnapshot(context: ProviderSettingsSnapshotContext) -> ProviderSettingsSnapshotContribution? {
+        .antigravity(context.settings.antigravitySettingsSnapshot())
+    }
+
+    @MainActor
     func runLoginFlow(context: ProviderLoginContext) async -> Bool {
         await context.controller.runAntigravityLoginFlow()
         return false

@@ -33,19 +33,34 @@ public enum AntigravityProviderDescriptor {
                 supportsTokenCost: false,
                 noDataMessage: { "Antigravity cost summary is not supported." }),
             fetchPlan: ProviderFetchPlan(
-                sourceModes: [.auto, .cli],
-                pipeline: ProviderFetchPipeline(resolveStrategies: { _ in [AntigravityStatusFetchStrategy()] })),
+                sourceModes: [.auto, .oauth, .cli],
+                pipeline: ProviderFetchPipeline(resolveStrategies: Self.resolveStrategies)),
             cli: ProviderCLIConfig(
                 name: "antigravity",
                 versionDetector: nil))
     }
+
+    private static func resolveStrategies(_ context: ProviderFetchContext) -> [any ProviderFetchStrategy] {
+        let usageSource = context.settings?.antigravity?.usageSource ?? .auto
+
+        switch usageSource {
+        case .auto:
+            return [AntigravityAuthorizedFetchStrategy(), AntigravityLocalFetchStrategy()]
+        case .authorized:
+            return [AntigravityAuthorizedFetchStrategy()]
+        case .local:
+            return [AntigravityLocalFetchStrategy()]
+        }
+    }
 }
 
-struct AntigravityStatusFetchStrategy: ProviderFetchStrategy {
+struct AntigravityLocalFetchStrategy: ProviderFetchStrategy {
     let id: String = "antigravity.local"
     let kind: ProviderFetchKind = .localProbe
 
-    func isAvailable(_: ProviderFetchContext) async -> Bool { true }
+    func isAvailable(_: ProviderFetchContext) async -> Bool {
+        await AntigravityStatusProbe.isRunning()
+    }
 
     func fetch(_: ProviderFetchContext) async throws -> ProviderFetchResult {
         let probe = AntigravityStatusProbe()
@@ -57,6 +72,6 @@ struct AntigravityStatusFetchStrategy: ProviderFetchStrategy {
     }
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {
-        false
+        true
     }
 }
