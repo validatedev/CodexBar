@@ -9,52 +9,59 @@ public struct AntigravityAuthorizedFetchStrategy: ProviderFetchStrategy {
     public init() {}
 
     public func isAvailable(_ context: ProviderFetchContext) async -> Bool {
-        if let credentials = AntigravityOAuthCredentialsStore.load() {
-            if !credentials.accessToken.isEmpty { return true }
-            if credentials.isRefreshable { return true }
+        guard let accountLabel = context.settings?.antigravity?.accountLabel else {
+            return false
         }
 
-        if let manualToken = context.settings?.antigravityManualToken,
-           !manualToken.isEmpty
-        {
-            return true
+        if let manualCredentials = self.loadManualCredentials(accountLabel: accountLabel, context: context) {
+            return !manualCredentials.accessToken.isEmpty
         }
 
-        return false
+        guard let credentials = AntigravityOAuthCredentialsStore.load(accountLabel: accountLabel) else {
+            return false
+        }
+        if !credentials.accessToken.isEmpty { return true }
+        return credentials.isRefreshable
     }
 
     public func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
-        let credentials = try await self.resolveCredentials(context: context)
+        let resolved = try await self.resolveCredentials(context: context)
+        let accountLabel = resolved.accountLabel
+        let credentials = resolved.credentials
+        let sourceLabel = resolved.sourceLabel
 
-        let accessToken: String
-        if credentials.needsRefresh, credentials.isRefreshable {
-            Self.log.info("Antigravity credentials need refresh")
+        var refreshedCredentials: AntigravityOAuthCredentials?
+        if credentials.needsRefresh || (credentials.accessToken.isEmpty && credentials.isRefreshable) {
             let refreshed = try await self.refreshCredentials(credentials)
-            accessToken = refreshed.accessToken
-        } else if credentials.accessToken.isEmpty, credentials.isRefreshable {
-            Self.log.info("Antigravity credentials have no access token, refreshing")
-            let refreshed = try await self.refreshCredentials(credentials)
-            accessToken = refreshed.accessToken
-        } else {
-            accessToken = credentials.accessToken
+            refreshedCredentials = refreshed
+            if KeychainAccessGate.isDisabled {
+                context.onCredentialsRefreshed?(.antigravity, accountLabel, refreshed.accessToken)
+            } else {
+                _ = AntigravityOAuthCredentialsStore.save(refreshed, accountLabel: accountLabel)
+            }
         }
 
-        let quota = try await AntigravityCloudCodeClient.fetchQuota(accessToken: accessToken)
+        let activeCredentials = refreshedCredentials ?? credentials
+        let quota = try await AntigravityCloudCodeClient.fetchQuota(accessToken: activeCredentials.accessToken)
         let snapshot = AntigravityStatusSnapshot(
             modelQuotas: quota.models,
-            accountEmail: credentials.email ?? quota.email,
+            accountEmail: activeCredentials.email ?? quota.email,
             accountPlan: nil)
 
         let usage = try snapshot.toUsageSnapshot()
-        return self.makeResult(usage: usage, sourceLabel: "authorized")
+        return self.makeResult(usage: usage, sourceLabel: sourceLabel)
     }
 
-    public func shouldFallback(on error: Error, context _: ProviderFetchContext) -> Bool {
+    public func shouldFallback(on error: Error, context: ProviderFetchContext) -> Bool {
+        let usageSource = context.settings?.antigravity?.usageSource ?? .auto
+
+        if usageSource == .auto {
+            return true
+        }
+
         if let oauthError = error as? AntigravityOAuthCredentialsError {
             switch oauthError {
-            case .invalidGrant:
-                return true
-            case .notFound:
+            case .invalidGrant, .notFound:
                 return true
             default:
                 return false
@@ -63,47 +70,28 @@ public struct AntigravityAuthorizedFetchStrategy: ProviderFetchStrategy {
         return false
     }
 
-    private func resolveCredentials(context: ProviderFetchContext) async throws -> AntigravityOAuthCredentials {
-        if let cached = AntigravityOAuthCredentialsStore.load() {
-            return cached
+    private func resolveCredentials(context: ProviderFetchContext) async throws
+        -> (accountLabel: String, credentials: AntigravityOAuthCredentials, sourceLabel: String)
+    {
+        guard let accountLabel = context.settings?.antigravity?.accountLabel,
+              let normalized = AntigravityOAuthCredentialsStore.normalizedLabel(accountLabel)
+        else {
+            throw AntigravityOAuthCredentialsError.notFound
         }
 
-        if let manualToken = context.settings?.antigravityManualToken,
-           !manualToken.isEmpty
-        {
-            if let parsed = AntigravityOAuthCredentialsStore.parseManualToken(manualToken) {
-                if parsed.isRefreshable, parsed.accessToken.isEmpty {
-                    let refreshed = try await AntigravityTokenRefresher.buildCredentialsFromRefreshToken(
-                        refreshToken: parsed.refreshToken!)
-                    AntigravityOAuthCredentialsStore.save(refreshed)
-                    return refreshed
-                }
-                return parsed
-            }
+        if let manualCredentials = self.loadManualCredentials(accountLabel: accountLabel, context: context) {
+            return (normalized, manualCredentials, "Manual")
         }
 
-        if AntigravityLocalImporter.isAvailable() {
-            let localInfo = try await AntigravityLocalImporter.importCredentials()
-            if let refreshToken = localInfo.refreshToken, !refreshToken.isEmpty {
-                let credentials = try await AntigravityTokenRefresher.buildCredentialsFromRefreshToken(
-                    refreshToken: refreshToken,
-                    fallbackEmail: localInfo.email)
-                AntigravityOAuthCredentialsStore.save(credentials)
-                return credentials
-            }
-            if let accessToken = localInfo.accessToken, !accessToken.isEmpty {
-                let credentials = AntigravityOAuthCredentials(
-                    accessToken: accessToken,
-                    refreshToken: nil,
-                    expiresAt: nil,
-                    email: localInfo.email,
-                    scopes: AntigravityOAuthConfig.scopes)
-                AntigravityOAuthCredentialsStore.save(credentials)
-                return credentials
-            }
+        guard let cached = AntigravityOAuthCredentialsStore.load(accountLabel: normalized) else {
+            throw AntigravityOAuthCredentialsError.notFound
         }
 
-        throw AntigravityOAuthCredentialsError.notFound
+        if cached.accessToken.isEmpty, !cached.isRefreshable {
+            throw AntigravityOAuthCredentialsError.notFound
+        }
+
+        return (normalized, cached, "OAuth")
     }
 
     private func refreshCredentials(_ credentials: AntigravityOAuthCredentials) async throws -> AntigravityOAuthCredentials {
@@ -111,10 +99,28 @@ public struct AntigravityAuthorizedFetchStrategy: ProviderFetchStrategy {
             throw AntigravityOAuthCredentialsError.invalidGrant
         }
 
-        let refreshed = try await AntigravityTokenRefresher.buildCredentialsFromRefreshToken(
+        return try await AntigravityTokenRefresher.buildCredentialsFromRefreshToken(
             refreshToken: refreshToken,
             fallbackEmail: credentials.email)
-        AntigravityOAuthCredentialsStore.save(refreshed)
-        return refreshed
+    }
+
+    private func loadManualCredentials(
+        accountLabel: String,
+        context: ProviderFetchContext
+    ) -> AntigravityOAuthCredentials? {
+        guard let normalized = AntigravityOAuthCredentialsStore.normalizedLabel(accountLabel) else { return nil }
+
+        let tokenAccounts = context.settings?.antigravity?.tokenAccounts
+        guard let account = tokenAccounts?.accounts.first(where: { $0.label.lowercased() == normalized }) else {
+            return nil
+        }
+
+        guard let payload = AntigravityOAuthCredentialsStore.manualTokenPayload(from: account.token) else { return nil }
+        return AntigravityOAuthCredentials(
+            accessToken: payload.accessToken,
+            refreshToken: payload.refreshToken,
+            expiresAt: nil,
+            email: account.label,
+            scopes: [])
     }
 }

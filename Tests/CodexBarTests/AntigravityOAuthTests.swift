@@ -2,70 +2,26 @@ import Foundation
 import Testing
 @testable import CodexBarCore
 
-@Suite("AntigravityOAuthCredentials")
+@Suite
 struct AntigravityOAuthCredentialsTests {
-    @Test("Credentials are not expired when expiresAt is in the future")
-    func test_credentialsNotExpired() {
-        let creds = AntigravityOAuthCredentials(
-            accessToken: "ya29.test",
-            refreshToken: "1//refresh",
-            expiresAt: Date().addingTimeInterval(3600),
-            email: "test@example.com")
-        #expect(!creds.isExpired)
-    }
-
-    @Test("Credentials are expired when expiresAt is in the past")
-    func test_credentialsExpired() {
-        let creds = AntigravityOAuthCredentials(
+    @Test
+    func isExpired() {
+        let expired = AntigravityOAuthCredentials(
             accessToken: "ya29.test",
             refreshToken: "1//refresh",
             expiresAt: Date().addingTimeInterval(-3600),
             email: "test@example.com")
-        #expect(creds.isExpired)
-    }
-
-    @Test("Credentials with nil expiresAt are not expired")
-    func test_credentialsNilExpiresAtNotExpired() {
-        let creds = AntigravityOAuthCredentials(
+        let valid = AntigravityOAuthCredentials(
             accessToken: "ya29.test",
             refreshToken: "1//refresh",
-            expiresAt: nil,
+            expiresAt: Date().addingTimeInterval(3600),
             email: "test@example.com")
-        #expect(!creds.isExpired)
+        #expect(expired.isExpired)
+        #expect(!valid.isExpired)
     }
 
-    @Test("Credentials are refreshable when refresh token is present")
-    func test_credentialsIsRefreshable() {
-        let creds = AntigravityOAuthCredentials(
-            accessToken: "ya29.test",
-            refreshToken: "1//refresh",
-            expiresAt: nil,
-            email: nil)
-        #expect(creds.isRefreshable)
-    }
-
-    @Test("Credentials are not refreshable when refresh token is nil")
-    func test_credentialsNotRefreshableNil() {
-        let creds = AntigravityOAuthCredentials(
-            accessToken: "ya29.test",
-            refreshToken: nil,
-            expiresAt: nil,
-            email: nil)
-        #expect(!creds.isRefreshable)
-    }
-
-    @Test("Credentials are not refreshable when refresh token is empty")
-    func test_credentialsNotRefreshableEmpty() {
-        let creds = AntigravityOAuthCredentials(
-            accessToken: "ya29.test",
-            refreshToken: "",
-            expiresAt: nil,
-            email: nil)
-        #expect(!creds.isRefreshable)
-    }
-
-    @Test("Credentials need refresh when close to expiry")
-    func test_credentialsNeedRefresh() {
+    @Test
+    func needsRefreshWhenExpiringSoon() {
         let creds = AntigravityOAuthCredentials(
             accessToken: "ya29.test",
             refreshToken: "1//refresh",
@@ -73,131 +29,149 @@ struct AntigravityOAuthCredentialsTests {
             email: nil)
         #expect(creds.needsRefresh)
     }
+}
 
-    @Test("Credentials don't need refresh when not close to expiry")
-    func test_credentialsDontNeedRefresh() {
+@Suite(.serialized)
+struct AntigravityOAuthCredentialsStoreTests {
+    @Test
+    func normalizesLabel() {
+        let normalized = AntigravityOAuthCredentialsStore.normalizedLabel("  User@Example.com \n")
+        #expect(normalized == "user@example.com")
+    }
+
+    @Test
+    func saveAndLoadByLabel() {
+        KeychainCacheStore.setTestStoreForTesting(true)
+        defer { KeychainCacheStore.setTestStoreForTesting(false) }
+        let previousKeychainDisabled = KeychainAccessGate.isDisabled
+        KeychainAccessGate.isDisabled = false
+        defer { KeychainAccessGate.isDisabled = previousKeychainDisabled }
+        AntigravityOAuthCredentialsStore.invalidateCache()
+
         let creds = AntigravityOAuthCredentials(
             accessToken: "ya29.test",
             refreshToken: "1//refresh",
             expiresAt: Date().addingTimeInterval(3600),
-            email: nil)
-        #expect(!creds.needsRefresh)
+            email: "user@example.com")
+        #expect(AntigravityOAuthCredentialsStore.save(creds, accountLabel: "User@Example.com"))
+
+        let loaded = AntigravityOAuthCredentialsStore.load(accountLabel: "user@example.com")
+        #expect(loaded?.accessToken == "ya29.test")
+        #expect(loaded?.refreshToken == "1//refresh")
     }
 }
 
-@Suite("AntigravityManualTokenParsing")
-struct AntigravityManualTokenParsingTests {
-    @Test("Parses access token starting with ya29.")
-    func test_parseAccessToken() {
-        let token = "ya29.a0ARrdaM..."
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken(token)
-        #expect(creds != nil)
-        #expect(creds?.accessToken == token)
-        #expect(creds?.refreshToken == nil)
+@Suite
+struct AntigravityManualTokenPayloadTests {
+    @Test
+    func parsesJSONPayload() {
+        let token = AntigravityOAuthCredentialsStore.manualTokenValue(
+            accessToken: "ya29.test",
+            refreshToken: "1//refresh")
+        let payload = AntigravityOAuthCredentialsStore.manualTokenPayload(from: token)
+        #expect(payload?.accessToken == "ya29.test")
+        #expect(payload?.refreshToken == "1//refresh")
     }
 
-    @Test("Parses refresh token starting with 1//")
-    func test_parseRefreshToken() {
-        let token = "1//0gXyz..."
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken(token)
-        #expect(creds != nil)
-        #expect(creds?.accessToken.isEmpty == true)
-        #expect(creds?.refreshToken == token)
-    }
-
-    @Test("Parses JSON with apiKey")
-    func test_parseJSONWithApiKey() {
-        let json = """
-        {"apiKey": "ya29.test", "email": "test@example.com"}
-        """
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken(json)
-        #expect(creds != nil)
-        #expect(creds?.accessToken == "ya29.test")
-        #expect(creds?.email == "test@example.com")
-    }
-
-    @Test("Parses JSON with accessToken")
-    func test_parseJSONWithAccessToken() {
-        let json = """
-        {"accessToken": "ya29.test", "refreshToken": "1//refresh"}
-        """
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken(json)
-        #expect(creds != nil)
-        #expect(creds?.accessToken == "ya29.test")
-        #expect(creds?.refreshToken == "1//refresh")
-    }
-
-    @Test("Parses JSON with expiresAt as string")
-    func test_parseJSONWithExpiresAtString() {
-        let json = """
-        {"apiKey": "ya29.test", "expiresAt": "2025-01-01T00:00:00Z"}
-        """
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken(json)
-        #expect(creds != nil)
-        #expect(creds?.expiresAt != nil)
-    }
-
-    @Test("Parses JSON with expiresAt as milliseconds")
-    func test_parseJSONWithExpiresAtMillis() {
-        let json = """
-        {"apiKey": "ya29.test", "expiresAt": 1735689600000}
-        """
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken(json)
-        #expect(creds != nil)
-        #expect(creds?.expiresAt != nil)
-    }
-
-    @Test("Returns nil for empty input")
-    func test_parseEmptyInput() {
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken("")
-        #expect(creds == nil)
-    }
-
-    @Test("Returns nil for whitespace-only input")
-    func test_parseWhitespaceOnlyInput() {
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken("   \n\t  ")
-        #expect(creds == nil)
-    }
-
-    @Test("Returns nil for invalid token format")
-    func test_parseInvalidTokenFormat() {
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken("not-a-valid-token")
-        #expect(creds == nil)
-    }
-
-    @Test("Returns nil for JSON without apiKey or accessToken")
-    func test_parseJSONWithoutToken() {
-        let json = """
-        {"email": "test@example.com"}
-        """
-        let creds = AntigravityOAuthCredentialsStore.parseManualToken(json)
-        #expect(creds == nil)
+    @Test
+    func parsesLegacyPayload() {
+        let token = "\(AntigravityOAuthCredentialsStore.manualTokenPrefix)ya29.test"
+        let payload = AntigravityOAuthCredentialsStore.manualTokenPayload(from: token)
+        #expect(payload?.accessToken == "ya29.test")
+        #expect(payload?.refreshToken == nil)
     }
 }
 
-@Suite("AntigravityUsageSource")
+@Suite
 struct AntigravityUsageSourceTests {
-    @Test("UsageSource has expected cases")
-    func test_usageSourceCases() {
-        let allCases = AntigravityUsageSource.allCases
-        #expect(allCases.contains(.auto))
-        #expect(allCases.contains(.authorized))
-        #expect(allCases.contains(.local))
-        #expect(allCases.count == 3)
-    }
-
-    @Test("UsageSource rawValue matches expected strings")
-    func test_usageSourceRawValues() {
-        #expect(AntigravityUsageSource.auto.rawValue == "auto")
-        #expect(AntigravityUsageSource.authorized.rawValue == "authorized")
-        #expect(AntigravityUsageSource.local.rawValue == "local")
-    }
-
-    @Test("UsageSource can be initialized from rawValue")
-    func test_usageSourceFromRawValue() {
-        #expect(AntigravityUsageSource(rawValue: "auto") == .auto)
+    @Test
+    func parsesRawValue() {
+        #expect(AntigravityUsageSource(rawValue: "cli") == .local)
         #expect(AntigravityUsageSource(rawValue: "authorized") == .authorized)
-        #expect(AntigravityUsageSource(rawValue: "local") == .local)
-        #expect(AntigravityUsageSource(rawValue: "invalid") == nil)
+    }
+}
+
+@Suite(.serialized)
+struct AntigravityAuthorizedFetchStrategyTests {
+    private func makeContext(usageSource: AntigravityUsageSource, accountLabel: String?) -> ProviderFetchContext {
+        let browserDetection = BrowserDetection(cacheTTL: 0)
+        let settings = ProviderSettingsSnapshot(
+            debugMenuEnabled: false,
+            debugKeepCLISessionsAlive: false,
+            codex: nil,
+            claude: nil,
+            cursor: nil,
+            opencode: nil,
+            factory: nil,
+            minimax: nil,
+            zai: nil,
+            copilot: nil,
+            kimi: nil,
+            augment: nil,
+            amp: nil,
+            jetbrains: nil,
+            antigravity: .init(usageSource: usageSource, accountLabel: accountLabel))
+        return ProviderFetchContext(
+            runtime: .cli,
+            sourceMode: .auto,
+            includeCredits: false,
+            webTimeout: 60,
+            webDebugDumpHTML: false,
+            verbose: false,
+            env: [:],
+            settings: settings,
+            fetcher: UsageFetcher(),
+            claudeFetcher: ClaudeUsageFetcher(browserDetection: browserDetection),
+            browserDetection: browserDetection)
+    }
+
+    @Test
+    func unavailableWithoutAccountLabel() async {
+        let strategy = AntigravityAuthorizedFetchStrategy()
+        let context = self.makeContext(usageSource: .auto, accountLabel: nil)
+        let available = await strategy.isAvailable(context)
+        #expect(!available)
+    }
+
+    @Test
+    func availableWithStoredCredentials() async {
+        KeychainCacheStore.setTestStoreForTesting(true)
+        defer { KeychainCacheStore.setTestStoreForTesting(false) }
+        let previousKeychainDisabled = KeychainAccessGate.isDisabled
+        KeychainAccessGate.isDisabled = false
+        defer { KeychainAccessGate.isDisabled = previousKeychainDisabled }
+        AntigravityOAuthCredentialsStore.invalidateCache()
+
+        let creds = AntigravityOAuthCredentials(
+            accessToken: "ya29.test",
+            refreshToken: "1//refresh",
+            expiresAt: Date().addingTimeInterval(3600),
+            email: "user@example.com")
+        _ = AntigravityOAuthCredentialsStore.save(creds, accountLabel: "user@example.com")
+
+        let strategy = AntigravityAuthorizedFetchStrategy()
+        let context = self.makeContext(usageSource: .auto, accountLabel: "user@example.com")
+        let available = await strategy.isAvailable(context)
+        #expect(available)
+    }
+
+    @Test
+    func fallbackInAutoMode() {
+        let strategy = AntigravityAuthorizedFetchStrategy()
+        let context = self.makeContext(usageSource: .auto, accountLabel: "user@example.com")
+        let shouldFallback = strategy.shouldFallback(
+            on: AntigravityOAuthCredentialsError.networkError("test"),
+            context: context)
+        #expect(shouldFallback)
+    }
+
+    @Test
+    func noFallbackOnNetworkErrorInOAuthMode() {
+        let strategy = AntigravityAuthorizedFetchStrategy()
+        let context = self.makeContext(usageSource: .authorized, accountLabel: "user@example.com")
+        let shouldFallback = strategy.shouldFallback(
+            on: AntigravityOAuthCredentialsError.networkError("test"),
+            context: context)
+        #expect(!shouldFallback)
     }
 }

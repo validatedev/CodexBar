@@ -9,45 +9,28 @@ read_when:
 
 # Antigravity provider
 
-Antigravity supports both OAuth-authorized API access and local language server probing.
+Antigravity supports OAuth-authorized Cloud Code quota and local language server probing.
 
 ## Usage source modes
 
-- **Auto** (default): Try authorized credentials first, fallback to local server
-- **Authorized**: Use OAuth credentials to fetch quota from Cloud Code API
-- **Local**: Use local Antigravity language server only
+- **Auto** (default): OAuth/manual first, fallback to local server
+- **OAuth**: OAuth/manual only
+- **Local**: local Antigravity language server only
 
-## Credential acquisition
+## OAuth credentials
 
-### Fallback order (Auto mode)
+- **Keychain**: stored from the OAuth browser flow
+- **Manual tokens**: stored in token accounts with `manual:` prefix (access `ya29.` + optional refresh `1//`)
+- **Local import**: `~/Library/Application Support/Antigravity/User/globalStorage/state.vscdb`
+  - refresh token: `jetskiStateSync.agentManagerInitState` (protobuf field 6)
+  - access token/email: `antigravityAuthStatus` JSON (`apiKey`, `email`)
+- OAuth callback server listens on `http://127.0.0.1:11451+`
 
-1. **Keychain OAuth credentials** - Previously saved credentials from OAuth flow or import
-2. **Manual token** - Token pasted in settings (refresh token or access token)
-3. **Local DB import** - Import from `state.vscdb` (Antigravity app's local storage)
-4. **Local server** - Direct probe to running Antigravity language server
+## Cloud Code API endpoints
 
-### OAuth browser flow
-
-Opens Google OAuth in browser with local callback server (port 11451+). Returns refresh token for long-term storage.
-
-### Local DB import (`state.vscdb`)
-
-Path: `~/Library/Application Support/Antigravity/User/globalStorage/state.vscdb`
-
-- **Refresh token**: `jetskiStateSync.agentManagerInitState` (protobuf field 6)
-- **Access token + email**: `antigravityAuthStatus` JSON (`apiKey`, `email` fields)
-
-### Manual token import
-
-Accepts:
-- Raw access token (`ya29.xxx`)
-- Raw refresh token (`1//xxx`)
-- JSON payload: `{"apiKey": "...", "email": "...", "refreshToken": "..."}`
-
-### Cloud Code API endpoints
-
-- Primary: `https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
-- Fallback: `https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
+- `POST https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
+- `POST https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
+- `POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`
 
 ## Local server data sources + fallback order
 
@@ -127,6 +110,7 @@ Accepts:
 ### App Integration
 - `Sources/CodexBar/Providers/Antigravity/AntigravityProviderImplementation.swift`
 - `Sources/CodexBar/Providers/Antigravity/AntigravitySettingsStore.swift`
+- `Sources/CodexBar/Providers/Antigravity/AntigravityLoginFlow.swift`
 
 ### Tests
 - `Tests/CodexBarTests/AntigravityOAuthTests.swift`

@@ -59,7 +59,7 @@ struct AntigravityLocalFetchStrategy: ProviderFetchStrategy {
     let kind: ProviderFetchKind = .localProbe
 
     func isAvailable(_: ProviderFetchContext) async -> Bool {
-        await AntigravityStatusProbe.isRunning()
+        true
     }
 
     func fetch(_: ProviderFetchContext) async throws -> ProviderFetchResult {
@@ -68,7 +68,7 @@ struct AntigravityLocalFetchStrategy: ProviderFetchStrategy {
         let usage = try snap.toUsageSnapshot()
         return self.makeResult(
             usage: usage,
-            sourceLabel: "local")
+            sourceLabel: "Local Server")
     }
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {

@@ -27,22 +27,17 @@ public actor AntigravityOAuthFlow {
         Self.log.info("Opening Antigravity OAuth authorization URL")
         #if os(macOS)
         if let url = URL(string: authURL) {
-            await MainActor.run {
+            _ = await MainActor.run {
                 NSWorkspace.shared.open(url)
             }
         }
         #endif
 
-        do {
-            let code = try await withCheckedThrowingContinuation { continuation in
-                self.pendingContinuation = continuation
-            }
-
-            let credentials = try await self.exchangeCodeForToken(code: code, redirectUri: redirectUri)
-            return credentials
-        } catch {
-            throw error
+        let code = try await withCheckedThrowingContinuation { continuation in
+            self.pendingContinuation = continuation
         }
+
+        return try await self.exchangeCodeForToken(code: code, redirectUri: redirectUri)
     }
 
     public func cancelAuthorization() {

@@ -2,8 +2,6 @@ import Foundation
 import SQLite3
 
 public enum AntigravityLocalImporter {
-    private static let log = CodexBarLog.logger(LogCategories.antigravity)
-
     public struct LocalCredentialInfo: Sendable {
         public let accessToken: String?
         public let refreshToken: String?
@@ -117,7 +115,12 @@ public enum AntigravityLocalImporter {
         }
         defer { sqlite3_finalize(stmt) }
 
-        sqlite3_bind_text(stmt, 1, key, -1, nil)
+        let keyCString = key.cString(using: .utf8)
+        guard let keyCString else {
+            throw AntigravityOAuthCredentialsError.decodeFailed("Failed to convert key to UTF-8: \(key)")
+        }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, keyCString, -1, transient)
 
         guard sqlite3_step(stmt) == SQLITE_ROW else {
             throw AntigravityOAuthCredentialsError.notFound

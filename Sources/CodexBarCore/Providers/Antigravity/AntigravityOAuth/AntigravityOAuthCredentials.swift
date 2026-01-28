@@ -1,7 +1,4 @@
 import Foundation
-#if os(macOS)
-import Security
-#endif
 
 public struct AntigravityOAuthCredentials: Sendable, Codable {
     public let accessToken: String
@@ -76,7 +73,7 @@ public enum AntigravityOAuthCredentialsError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .notFound:
-            "Antigravity credentials not found. Authorize or import from Antigravity app."
+            "Antigravity credentials not found. Sign in with Google to add an OAuth account."
         case let .decodeFailed(message):
             "Failed to decode Antigravity credentials: \(message)"
         case .missingAccessToken:
@@ -94,147 +91,134 @@ public enum AntigravityOAuthCredentialsError: LocalizedError, Sendable {
 }
 
 public enum AntigravityOAuthCredentialsStore {
-    private static let cacheKey = KeychainCacheStore.Key.oauth(provider: .antigravity)
+    public static let manualTokenPrefix = "manual:"
     private static let log = CodexBarLog.logger(LogCategories.antigravity)
-    public static let environmentTokenKey = "CODEXBAR_ANTIGRAVITY_TOKEN"
+    public static let environmentAccountKey = "CODEXBAR_ANTIGRAVITY_ACCOUNT"
+    private static let cacheCategory = "oauth.antigravity"
+
+    public struct ManualTokenPayload: Sendable {
+        public let accessToken: String
+        public let refreshToken: String?
+
+        public init(accessToken: String, refreshToken: String?) {
+            self.accessToken = accessToken
+            self.refreshToken = refreshToken
+        }
+    }
 
     struct CacheEntry: Codable, Sendable {
         let credentials: AntigravityOAuthCredentials
         let storedAt: Date
     }
 
-    private nonisolated(unsafe) static var cachedCredentials: AntigravityOAuthCredentials?
-    private nonisolated(unsafe) static var cacheTimestamp: Date?
+    private nonisolated(unsafe) static var cachedCredentialsByLabel: [String: AntigravityOAuthCredentials] = [:]
+    private nonisolated(unsafe) static var cacheTimestampByLabel: [String: Date] = [:]
     private static let memoryCacheValidityDuration: TimeInterval = 1800
 
-    public static func load(
-        environment: [String: String] = ProcessInfo.processInfo.environment) -> AntigravityOAuthCredentials?
-    {
-        if let credentials = self.loadFromEnvironment(environment) {
-            return credentials
-        }
+    public static func normalizedLabel(_ label: String) -> String? {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.lowercased()
+    }
 
-        if let cached = self.cachedCredentials,
-           let timestamp = self.cacheTimestamp,
+    public static func manualTokenPayload(from token: String) -> ManualTokenPayload? {
+        guard token.hasPrefix(self.manualTokenPrefix) else { return nil }
+        let content = String(token.dropFirst(self.manualTokenPrefix.count))
+        if let jsonData = content.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: String],
+           let accessToken = json["access"],
+           !accessToken.isEmpty
+        {
+            return ManualTokenPayload(accessToken: accessToken, refreshToken: json["refresh"])
+        }
+        guard !content.isEmpty else { return nil }
+        return ManualTokenPayload(accessToken: content, refreshToken: nil)
+    }
+
+    public static func manualTokenValue(accessToken: String, refreshToken: String?) -> String {
+        let trimmedAccess = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedRefresh = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let refresh = trimmedRefresh, !refresh.isEmpty {
+            let tokenData = ["access": trimmedAccess, "refresh": refresh]
+            if let jsonData = try? JSONSerialization.data(withJSONObject: tokenData),
+               let jsonString = String(data: jsonData, encoding: .utf8)
+            {
+                return "\(self.manualTokenPrefix)\(jsonString)"
+            }
+        }
+        return "\(self.manualTokenPrefix)\(trimmedAccess)"
+    }
+
+    public static func load(accountLabel: String) -> AntigravityOAuthCredentials? {
+        guard let normalized = self.normalizedLabel(accountLabel) else { return nil }
+        guard !KeychainAccessGate.isDisabled else { return nil }
+
+        if let cached = self.cachedCredentialsByLabel[normalized],
+           let timestamp = self.cacheTimestampByLabel[normalized],
            Date().timeIntervalSince(timestamp) < self.memoryCacheValidityDuration,
            !cached.isExpired
         {
             return cached
         }
 
-        switch KeychainCacheStore.load(key: self.cacheKey, as: CacheEntry.self) {
+        switch KeychainCacheStore.load(key: self.key(for: normalized), as: CacheEntry.self) {
         case let .found(entry):
             if entry.credentials.isExpired, !entry.credentials.isRefreshable {
                 self.log.debug("Antigravity cached credentials expired and not refreshable")
                 return entry.credentials
             }
-            self.cachedCredentials = entry.credentials
-            self.cacheTimestamp = Date()
+            self.cachedCredentialsByLabel[normalized] = entry.credentials
+            self.cacheTimestampByLabel[normalized] = Date()
             return entry.credentials
         case .invalid:
-            KeychainCacheStore.clear(key: self.cacheKey)
+            KeychainCacheStore.clear(key: self.key(for: normalized))
+            self.cachedCredentialsByLabel.removeValue(forKey: normalized)
+            self.cacheTimestampByLabel.removeValue(forKey: normalized)
             return nil
         case .missing:
             return nil
         }
     }
 
-    public static func save(_ credentials: AntigravityOAuthCredentials) {
+    public static func save(_ credentials: AntigravityOAuthCredentials, accountLabel: String) -> Bool {
+        guard let normalized = self.normalizedLabel(accountLabel) else { return false }
+        guard !KeychainAccessGate.isDisabled else {
+            self.log.error("Antigravity OAuth save failed: keychain access disabled")
+            return false
+        }
+
+        self.saveToKeychain(credentials, normalizedLabel: normalized)
+        return true
+    }
+
+    public static func clear(accountLabel: String) {
+        guard let normalized = self.normalizedLabel(accountLabel) else { return }
+        KeychainCacheStore.clear(key: self.key(for: normalized))
+        self.cachedCredentialsByLabel.removeValue(forKey: normalized)
+        self.cacheTimestampByLabel.removeValue(forKey: normalized)
+        self.log.info("Antigravity credentials cleared", metadata: [
+            "label": normalized,
+        ])
+    }
+
+    public static func invalidateCache() {
+        self.cachedCredentialsByLabel.removeAll()
+        self.cacheTimestampByLabel.removeAll()
+    }
+
+    private static func saveToKeychain(_ credentials: AntigravityOAuthCredentials, normalizedLabel: String) {
         let entry = CacheEntry(credentials: credentials, storedAt: Date())
-        KeychainCacheStore.store(key: self.cacheKey, entry: entry)
-        self.cachedCredentials = credentials
-        self.cacheTimestamp = Date()
+        KeychainCacheStore.store(key: self.key(for: normalizedLabel), entry: entry)
+        self.cachedCredentialsByLabel[normalizedLabel] = credentials
+        self.cacheTimestampByLabel[normalizedLabel] = Date()
         self.log.info("Antigravity credentials saved", metadata: [
+            "label": normalizedLabel,
             "email": credentials.email ?? "unknown",
             "hasRefreshToken": "\(credentials.isRefreshable)",
         ])
     }
 
-    public static func clear() {
-        KeychainCacheStore.clear(key: self.cacheKey)
-        self.cachedCredentials = nil
-        self.cacheTimestamp = nil
-        self.log.info("Antigravity credentials cleared")
-    }
-
-    public static func invalidateCache() {
-        self.cachedCredentials = nil
-        self.cacheTimestamp = nil
-    }
-
-    private static func loadFromEnvironment(_ environment: [String: String]) -> AntigravityOAuthCredentials? {
-        guard let token = environment[self.environmentTokenKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !token.isEmpty
-        else {
-            return nil
-        }
-
-        return AntigravityOAuthCredentials(
-            accessToken: token,
-            refreshToken: nil,
-            expiresAt: Date.distantFuture,
-            email: nil,
-            scopes: AntigravityOAuthConfig.scopes)
-    }
-}
-
-extension AntigravityOAuthCredentialsStore {
-    public static func parseManualToken(_ input: String) -> AntigravityOAuthCredentials? {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if let jsonCredentials = self.parseJSONInput(trimmed) {
-            return jsonCredentials
-        }
-
-        if trimmed.hasPrefix("ya29.") || trimmed.hasPrefix("1//") {
-            let isRefreshToken = trimmed.hasPrefix("1//")
-            if isRefreshToken {
-                return AntigravityOAuthCredentials(
-                    accessToken: "",
-                    refreshToken: trimmed,
-                    expiresAt: nil,
-                    email: nil,
-                    scopes: AntigravityOAuthConfig.scopes)
-            } else {
-                return AntigravityOAuthCredentials(
-                    accessToken: trimmed,
-                    refreshToken: nil,
-                    expiresAt: nil,
-                    email: nil,
-                    scopes: AntigravityOAuthConfig.scopes)
-            }
-        }
-
-        return nil
-    }
-
-    private static func parseJSONInput(_ input: String) -> AntigravityOAuthCredentials? {
-        guard let data = input.data(using: .utf8) else { return nil }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-
-        let apiKey = (json["apiKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let accessToken = (json["accessToken"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let refreshToken = (json["refreshToken"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let email = (json["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let token = apiKey ?? accessToken
-        guard let token, !token.isEmpty else { return nil }
-
-        var expiresAt: Date?
-        if let expiresAtString = json["expiresAt"] as? String {
-            expiresAt = ISO8601DateFormatter().date(from: expiresAtString)
-        } else if let expiresAtMillis = json["expiresAt"] as? Double {
-            expiresAt = Date(timeIntervalSince1970: expiresAtMillis / 1000.0)
-        }
-
-        return AntigravityOAuthCredentials(
-            accessToken: token,
-            refreshToken: refreshToken,
-            expiresAt: expiresAt,
-            email: email,
-            scopes: AntigravityOAuthConfig.scopes)
+    private static func key(for normalizedLabel: String) -> KeychainCacheStore.Key {
+        KeychainCacheStore.Key(category: self.cacheCategory, identifier: normalizedLabel)
     }
 }

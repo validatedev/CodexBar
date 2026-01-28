@@ -171,11 +171,17 @@ public struct ProviderSettingsSnapshot: Sendable {
 
     public struct AntigravityProviderSettings: Sendable {
         public let usageSource: AntigravityUsageSource
-        public let manualToken: String?
+        public let accountLabel: String?
+        public let tokenAccounts: ProviderTokenAccountData?
 
-        public init(usageSource: AntigravityUsageSource, manualToken: String?) {
+        public init(
+            usageSource: AntigravityUsageSource,
+            accountLabel: String?,
+            tokenAccounts: ProviderTokenAccountData? = nil)
+        {
             self.usageSource = usageSource
-            self.manualToken = manualToken
+            self.accountLabel = accountLabel
+            self.tokenAccounts = tokenAccounts
         }
     }
 
@@ -197,10 +203,6 @@ public struct ProviderSettingsSnapshot: Sendable {
 
     public var jetbrainsIDEBasePath: String? {
         self.jetbrains?.ideBasePath
-    }
-
-    public var antigravityManualToken: String? {
-        self.antigravity?.manualToken
     }
 
     public init(
