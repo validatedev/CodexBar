@@ -34,38 +34,69 @@ public struct AntigravityAuthorizedFetchStrategy: ProviderFetchStrategy {
 
     public func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         Self.log.debug("Fetching with authorized strategy")
-        
+
         let resolved = try await self.resolveCredentials(context: context)
         let accountLabel = resolved.accountLabel
-        let credentials = resolved.credentials
+        var credentials = resolved.credentials
         let sourceLabel = resolved.sourceLabel
+        var didRefresh = false
 
         Self.log.debug("Resolved credentials - source: \(sourceLabel), needsRefresh: \(credentials.needsRefresh), isRefreshable: \(credentials.isRefreshable)")
 
-        var refreshedCredentials: AntigravityOAuthCredentials?
         if credentials.needsRefresh || (credentials.accessToken.isEmpty && credentials.isRefreshable) {
             Self.log.debug("Credentials need refresh, refreshing token...")
-            let refreshed = try await self.refreshCredentials(credentials)
-            refreshedCredentials = refreshed
+            credentials = try await self.refreshAndSave(credentials, accountLabel: accountLabel, context: context)
+            didRefresh = true
             Self.log.debug("Token refresh successful")
-            if KeychainAccessGate.isDisabled {
-                context.onCredentialsRefreshed?(.antigravity, accountLabel, refreshed.accessToken)
-            } else {
-                _ = AntigravityOAuthCredentialsStore.save(refreshed, accountLabel: accountLabel)
-            }
         }
 
-        let activeCredentials = refreshedCredentials ?? credentials
-        let quota = try await AntigravityCloudCodeClient.fetchQuota(accessToken: activeCredentials.accessToken)
+        do {
+            return try await self.fetchQuotaAndMakeResult(credentials: credentials, sourceLabel: sourceLabel)
+        } catch AntigravityOAuthCredentialsError.invalidGrant where credentials.isRefreshable && !didRefresh {
+            Self.log.info("API returned invalidGrant, attempting refresh-and-retry")
+            credentials = try await self.refreshAndSave(credentials, accountLabel: accountLabel, context: context)
+            return try await self.fetchQuotaAndMakeResult(credentials: credentials, sourceLabel: sourceLabel)
+        }
+    }
+
+    private func fetchQuotaAndMakeResult(
+        credentials: AntigravityOAuthCredentials,
+        sourceLabel: String
+    ) async throws -> ProviderFetchResult {
+        let quota = try await AntigravityCloudCodeClient.fetchQuota(accessToken: credentials.accessToken)
         Self.log.debug("Successfully fetched quota from Cloud Code API")
-        
+
         let snapshot = AntigravityStatusSnapshot(
             modelQuotas: quota.models,
-            accountEmail: activeCredentials.email ?? quota.email,
+            accountEmail: credentials.email ?? quota.email,
             accountPlan: nil)
 
         let usage = try snapshot.toUsageSnapshot()
         return self.makeResult(usage: usage, sourceLabel: sourceLabel)
+    }
+
+    private func refreshAndSave(
+        _ credentials: AntigravityOAuthCredentials,
+        accountLabel: String,
+        context: ProviderFetchContext
+    ) async throws -> AntigravityOAuthCredentials {
+        do {
+            let refreshed = try await self.refreshCredentials(credentials)
+
+            if KeychainAccessGate.isDisabled {
+                context.onAntigravityCredentialsRefreshed?(accountLabel, refreshed)
+            } else {
+                _ = AntigravityOAuthCredentialsStore.save(refreshed, accountLabel: accountLabel)
+            }
+
+            return refreshed
+        } catch AntigravityOAuthCredentialsError.invalidGrant {
+            Self.log.warning("Refresh token invalid, clearing keychain credentials")
+            if !KeychainAccessGate.isDisabled {
+                AntigravityOAuthCredentialsStore.clear(accountLabel: accountLabel)
+            }
+            throw AntigravityOAuthCredentialsError.invalidGrant
+        }
     }
 
     public func shouldFallback(on error: Error, context: ProviderFetchContext) -> Bool {
@@ -135,7 +166,7 @@ public struct AntigravityAuthorizedFetchStrategy: ProviderFetchStrategy {
         return AntigravityOAuthCredentials(
             accessToken: payload.accessToken,
             refreshToken: payload.refreshToken,
-            expiresAt: nil,
+            expiresAt: payload.expiresAt,
             email: account.label,
             scopes: [])
     }

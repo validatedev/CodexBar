@@ -37,7 +37,7 @@ public struct AntigravityOAuthCredentials: Sendable, Codable {
     }
 
     public var needsRefresh: Bool {
-        guard let expiresAt else { return self.isRefreshable }
+        guard let expiresAt else { return false }
         let bufferTime: TimeInterval = 5 * 60
         return expiresAt.timeIntervalSinceNow < bufferTime
     }
@@ -103,10 +103,12 @@ public enum AntigravityOAuthCredentialsStore {
     public struct ManualTokenPayload: Sendable {
         public let accessToken: String
         public let refreshToken: String?
+        public let expiresAt: Date?
 
-        public init(accessToken: String, refreshToken: String?) {
+        public init(accessToken: String, refreshToken: String?, expiresAt: Date?) {
             self.accessToken = accessToken
             self.refreshToken = refreshToken
+            self.expiresAt = expiresAt
         }
     }
 
@@ -128,29 +130,39 @@ public enum AntigravityOAuthCredentialsStore {
     public static func manualTokenPayload(from token: String) -> ManualTokenPayload? {
         guard token.hasPrefix(self.manualTokenPrefix) else { return nil }
         let content = String(token.dropFirst(self.manualTokenPrefix.count))
-        if let jsonData = content.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: String],
-           let accessToken = json["access"],
-           !accessToken.isEmpty
-        {
-            return ManualTokenPayload(accessToken: accessToken, refreshToken: json["refresh"])
-        }
-        guard !content.isEmpty else { return nil }
-        return ManualTokenPayload(accessToken: content, refreshToken: nil)
+
+        guard let jsonData = content.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let accessToken = json["accessToken"] as? String,
+              !accessToken.isEmpty
+        else { return nil }
+
+        let refreshToken = json["refreshToken"] as? String
+        let expiresAt: Date? = (json["expiresAt"] as? TimeInterval).map { Date(timeIntervalSince1970: $0) }
+
+        return ManualTokenPayload(accessToken: accessToken, refreshToken: refreshToken, expiresAt: expiresAt)
     }
 
-    public static func manualTokenValue(accessToken: String, refreshToken: String?) -> String {
+    public static func manualTokenValue(
+        accessToken: String,
+        refreshToken: String?,
+        expiresAt: Date? = nil
+    ) -> String {
         let trimmedAccess = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedRefresh = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let refresh = trimmedRefresh, !refresh.isEmpty {
-            let tokenData = ["access": trimmedAccess, "refresh": refresh]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: tokenData),
-               let jsonString = String(data: jsonData, encoding: .utf8)
-            {
-                return "\(self.manualTokenPrefix)\(jsonString)"
-            }
+        var tokenData: [String: Any] = ["accessToken": trimmedAccess]
+
+        if let refresh = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines), !refresh.isEmpty {
+            tokenData["refreshToken"] = refresh
         }
-        return "\(self.manualTokenPrefix)\(trimmedAccess)"
+        if let expiresAt {
+            tokenData["expiresAt"] = expiresAt.timeIntervalSince1970
+        }
+
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: tokenData),
+              let jsonString = String(data: jsonData, encoding: .utf8)
+        else { return "\(self.manualTokenPrefix){\"accessToken\":\"\(trimmedAccess)\"}" }
+
+        return "\(self.manualTokenPrefix)\(jsonString)"
     }
 
     public static func load(accountLabel: String) -> AntigravityOAuthCredentials? {

@@ -10,6 +10,7 @@ public enum AntigravityLocalImporter {
         public let refreshToken: String?
         public let email: String?
         public let name: String?
+        public let expiresAt: Date?
 
         public var hasAccessToken: Bool {
             guard let accessToken else { return false }
@@ -48,29 +49,28 @@ public enum AntigravityLocalImporter {
 
         var refreshToken: String?
         var accessToken: String?
-        
-        do {
-            let protoInfo = try self.readProtoTokenInfo(dbPath: dbPath)
+        var expiresAt: Date?
+
+        if let protoInfo = try? self.readProtoTokenInfo(dbPath: dbPath) {
             refreshToken = protoInfo.refreshToken
             accessToken = protoInfo.accessToken
-            Self.log.debug("Extracted OAuth token info - access_token present: \(accessToken != nil && !accessToken!.isEmpty), refresh_token present: \(refreshToken != nil && !refreshToken!.isEmpty)")
-        } catch {
-            Self.log.debug("Failed to read proto token info: \(error)")
+            if let expiry = protoInfo.expirySeconds {
+                expiresAt = Date(timeIntervalSince1970: TimeInterval(expiry))
+            }
+            Self.log.debug("Extracted OAuth token info - access_token present: \(accessToken?.isEmpty == false), refresh_token present: \(refreshToken?.isEmpty == false)")
         }
 
         if let authStatus = try? self.readAuthStatus(dbPath: dbPath) {
-            Self.log.debug("Read auth status - email: \(authStatus.email ?? "none"), apiKey present: \(authStatus.apiKey != nil && !authStatus.apiKey!.isEmpty)")
-            
-            // Prefer accessToken from proto, fallback to apiKey from auth status
+            Self.log.debug("Read auth status - email: \(authStatus.email ?? "none"), apiKey present: \(authStatus.apiKey?.isEmpty == false)")
             let finalAccessToken = accessToken ?? authStatus.apiKey
-            
-            Self.log.debug("Import result - email: \(authStatus.email ?? "none"), hasAccessToken: \(finalAccessToken != nil && !finalAccessToken!.isEmpty), hasRefreshToken: \(refreshToken != nil && !refreshToken!.isEmpty)")
-            
+            Self.log.debug("Import result - email: \(authStatus.email ?? "none"), hasAccessToken: \(finalAccessToken?.isEmpty == false), hasRefreshToken: \(refreshToken?.isEmpty == false)")
+
             return LocalCredentialInfo(
                 accessToken: finalAccessToken,
                 refreshToken: refreshToken,
                 email: authStatus.email,
-                name: authStatus.name)
+                name: authStatus.name,
+                expiresAt: expiresAt)
         }
 
         if let refreshToken, !refreshToken.isEmpty {
@@ -79,7 +79,8 @@ public enum AntigravityLocalImporter {
                 accessToken: accessToken,
                 refreshToken: refreshToken,
                 email: nil,
-                name: nil)
+                name: nil,
+                expiresAt: expiresAt)
         }
 
         Self.log.debug("No credentials found in database")

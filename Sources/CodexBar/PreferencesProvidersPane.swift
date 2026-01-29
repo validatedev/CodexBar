@@ -269,7 +269,8 @@ struct ProvidersPane: View {
             guard let account = self.settings.addManualAntigravityTokenAccount(
                 label: label,
                 accessToken: accessToken,
-                refreshToken: credentials.refreshToken) else {
+                refreshToken: credentials.refreshToken,
+                expiresAt: credentials.expiresAt) else {
                 log.debug("Import failed: unable to save imported credentials")
                 self.presentAlert(
                     title: "Import Failed",

@@ -88,13 +88,13 @@ extension UsageStore {
             tokenOverride: override)
         let verbose = self.settings.isVerboseLoggingEnabled
 
-        let onCredentialsRefreshed: (@Sendable (UsageProvider, String, String?) -> Void) = { [weak self] provider, accountLabel, newAccessToken in
+        let onAntigravityCredentialsRefreshed: (@Sendable (String, AntigravityOAuthCredentials) -> Void) = { [weak self] accountLabel, credentials in
             Task { @MainActor in
-                guard let self = self else { return }
-                self.saveRefreshedCredentialsToConfig(provider: provider, accountLabel: accountLabel, newAccessToken: newAccessToken)
+                guard let self else { return }
+                self.saveRefreshedAntigravityCredentials(accountLabel: accountLabel, credentials: credentials)
             }
         }
-        
+
         let context = ProviderFetchContext(
             runtime: .app,
             sourceMode: sourceMode,
@@ -107,7 +107,7 @@ extension UsageStore {
             fetcher: self.codexFetcher,
             claudeFetcher: self.claudeFetcher,
             browserDetection: self.browserDetection,
-            onCredentialsRefreshed: onCredentialsRefreshed)
+            onAntigravityCredentialsRefreshed: onAntigravityCredentialsRefreshed)
         return await descriptor.fetchOutcome(context: context)
     }
 
@@ -213,18 +213,16 @@ extension UsageStore {
     }
 
     @MainActor
-    private func saveRefreshedCredentialsToConfig(provider: UsageProvider, accountLabel: String, newAccessToken: String?) {
-        guard provider == .antigravity else { return }
+    private func saveRefreshedAntigravityCredentials(accountLabel: String, credentials: AntigravityOAuthCredentials) {
         guard let normalizedLabel = AntigravityOAuthCredentialsStore.normalizedLabel(accountLabel) else { return }
 
         let tokenAccounts = self.settings.tokenAccountsData(for: .antigravity)
         guard let account = tokenAccounts?.accounts.first(where: { $0.label.lowercased() == normalizedLabel }) else { return }
-        guard let payload = AntigravityOAuthCredentialsStore.manualTokenPayload(from: account.token) else { return }
 
-        let accessToken = newAccessToken ?? payload.accessToken
         let tokenValue = AntigravityOAuthCredentialsStore.manualTokenValue(
-            accessToken: accessToken,
-            refreshToken: payload.refreshToken)
+            accessToken: credentials.accessToken,
+            refreshToken: credentials.refreshToken,
+            expiresAt: credentials.expiresAt)
 
         guard var accounts = tokenAccounts?.accounts else { return }
         guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
@@ -246,9 +244,9 @@ extension UsageStore {
             entry.tokenAccounts = updatedData
         }
 
-        self.providerLogger.info("Saved refreshed credentials to JSON config", metadata: [
-            "provider": "antigravity",
+        self.providerLogger.info("Saved refreshed Antigravity credentials with expiresAt", metadata: [
             "account": normalizedLabel,
+            "hasExpiresAt": "\(credentials.expiresAt != nil)",
         ])
     }
 }

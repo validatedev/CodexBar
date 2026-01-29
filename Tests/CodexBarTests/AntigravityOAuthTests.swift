@@ -67,18 +67,39 @@ struct AntigravityManualTokenPayloadTests {
     func parsesJSONPayload() {
         let token = AntigravityOAuthCredentialsStore.manualTokenValue(
             accessToken: "ya29.test",
-            refreshToken: "1//refresh")
+            refreshToken: "1//refresh",
+            expiresAt: nil)
         let payload = AntigravityOAuthCredentialsStore.manualTokenPayload(from: token)
         #expect(payload?.accessToken == "ya29.test")
         #expect(payload?.refreshToken == "1//refresh")
+        #expect(payload?.expiresAt == nil)
     }
 
     @Test
-    func parsesLegacyPayload() {
-        let token = "\(AntigravityOAuthCredentialsStore.manualTokenPrefix)ya29.test"
+    func parsesJSONPayloadWithExpiresAt() {
+        let expiresAt = Date(timeIntervalSince1970: 1_738_160_000)
+        let token = AntigravityOAuthCredentialsStore.manualTokenValue(
+            accessToken: "ya29.test",
+            refreshToken: "1//refresh",
+            expiresAt: expiresAt)
         let payload = AntigravityOAuthCredentialsStore.manualTokenPayload(from: token)
         #expect(payload?.accessToken == "ya29.test")
-        #expect(payload?.refreshToken == nil)
+        #expect(payload?.refreshToken == "1//refresh")
+        #expect(payload?.expiresAt?.timeIntervalSince1970 == 1_738_160_000)
+    }
+
+    @Test
+    func rejectsLegacyPayload() {
+        let token = "\(AntigravityOAuthCredentialsStore.manualTokenPrefix)ya29.test"
+        let payload = AntigravityOAuthCredentialsStore.manualTokenPayload(from: token)
+        #expect(payload == nil)
+    }
+
+    @Test
+    func rejectsOldJSONFormat() {
+        let token = "\(AntigravityOAuthCredentialsStore.manualTokenPrefix){\"access\":\"ya29.test\",\"refresh\":\"1//refresh\"}"
+        let payload = AntigravityOAuthCredentialsStore.manualTokenPayload(from: token)
+        #expect(payload == nil)
     }
 }
 

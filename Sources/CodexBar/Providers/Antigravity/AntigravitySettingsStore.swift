@@ -85,7 +85,8 @@ extension SettingsStore {
     func addManualAntigravityTokenAccount(
         label: String,
         accessToken: String,
-        refreshToken: String? = nil
+        refreshToken: String? = nil,
+        expiresAt: Date? = nil
     ) -> ProviderTokenAccount? {
         guard let normalizedLabel = AntigravityOAuthCredentialsStore.normalizedLabel(label) else { return nil }
 
@@ -94,7 +95,7 @@ extension SettingsStore {
             let credentials = AntigravityOAuthCredentials(
                 accessToken: accessToken,
                 refreshToken: refreshToken,
-                expiresAt: nil,
+                expiresAt: expiresAt,
                 email: normalizedLabel,
                 scopes: [])
             guard AntigravityOAuthCredentialsStore.save(credentials, accountLabel: normalizedLabel) else {
@@ -104,7 +105,8 @@ extension SettingsStore {
         } else {
             tokenValue = AntigravityOAuthCredentialsStore.manualTokenValue(
                 accessToken: accessToken,
-                refreshToken: refreshToken)
+                refreshToken: refreshToken,
+                expiresAt: expiresAt)
         }
 
         let existing = self.tokenAccountsData(for: .antigravity)
@@ -126,6 +128,10 @@ extension SettingsStore {
             self.updateProviderConfig(provider: .antigravity) { entry in
                 entry.tokenAccounts = updatedData
             }
+            self.triggerBackgroundRefreshIfNeeded(
+                label: label,
+                refreshToken: refreshToken,
+                expiresAt: expiresAt)
             return updated
         }
 
@@ -142,6 +148,30 @@ extension SettingsStore {
         self.updateProviderConfig(provider: .antigravity) { entry in
             entry.tokenAccounts = updatedData
         }
+        self.triggerBackgroundRefreshIfNeeded(
+            label: label,
+            refreshToken: refreshToken,
+            expiresAt: expiresAt)
         return account
+    }
+
+    private func triggerBackgroundRefreshIfNeeded(
+        label: String,
+        refreshToken: String?,
+        expiresAt: Date?
+    ) {
+        guard let refreshToken, !refreshToken.isEmpty, expiresAt == nil else { return }
+        guard let normalizedLabel = AntigravityOAuthCredentialsStore.normalizedLabel(label) else { return }
+
+        Task {
+            guard let refreshed = try? await AntigravityTokenRefresher.buildCredentialsFromRefreshToken(
+                refreshToken: refreshToken,
+                fallbackEmail: normalizedLabel) else { return }
+            _ = self.addManualAntigravityTokenAccount(
+                label: label,
+                accessToken: refreshed.accessToken,
+                refreshToken: refreshed.refreshToken,
+                expiresAt: refreshed.expiresAt)
+        }
     }
 }
