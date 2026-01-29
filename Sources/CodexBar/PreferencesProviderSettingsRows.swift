@@ -319,18 +319,11 @@ struct ProviderSettingsTokenAccountsRowView: View {
                 .controlSize(.small)
             }
 
-            HStack(spacing: 10) {
-                Button("Open token file") {
-                    self.descriptor.openConfigFile()
-                }
-                .buttonStyle(.link)
-                .controlSize(.small)
-                Button("Reload") {
-                    self.descriptor.reloadFromDisk()
-                }
-                .buttonStyle(.link)
-                .controlSize(.small)
+            Button("Open config file") {
+                self.descriptor.openConfigFile()
             }
+            .buttonStyle(.link)
+            .controlSize(.small)
         }
     }
 }

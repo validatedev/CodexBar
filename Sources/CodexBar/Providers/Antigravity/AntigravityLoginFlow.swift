@@ -9,12 +9,6 @@ struct AntigravityLoginFlow {
         Self.log.debug("Starting Antigravity OAuth login flow")
         Self.log.debug("Keychain access disabled: \(KeychainAccessGate.isDisabled)")
 
-        if KeychainAccessGate.isDisabled {
-            Self.presentAlert(
-                title: "Authorization Unavailable",
-                message: "Keychain access is disabled. Enable it to store Antigravity OAuth accounts.")
-            return false
-        }
         let flow = AntigravityOAuthFlow()
 
         let waitingAlert = NSAlert()
@@ -86,12 +80,26 @@ struct AntigravityLoginFlow {
             return nil
         }
         Self.log.debug("Persisting credentials for account: \(accountLabel)")
-        guard AntigravityOAuthCredentialsStore.save(credentials, accountLabel: accountLabel) else {
-            Self.log.debug("Failed to save credentials to Keychain")
-            return nil
+
+        if !KeychainAccessGate.isDisabled {
+            guard AntigravityOAuthCredentialsStore.save(credentials, accountLabel: accountLabel) else {
+                Self.log.debug("Failed to save credentials to Keychain")
+                return nil
+            }
+            Self.log.debug("Saved credentials to Keychain")
+            _ = settings.upsertAntigravityTokenAccount(label: accountLabel)
+        } else {
+            Self.log.debug("Keychain disabled, storing tokens in config")
+            guard settings.addManualAntigravityTokenAccount(
+                label: accountLabel,
+                accessToken: credentials.accessToken,
+                refreshToken: credentials.refreshToken) != nil
+            else {
+                Self.log.debug("Failed to save credentials to config")
+                return nil
+            }
         }
-        Self.log.debug("Saved credentials to Keychain successfully")
-        _ = settings.upsertAntigravityTokenAccount(label: accountLabel)
+
         settings.setProviderEnabled(
             provider: .antigravity,
             metadata: ProviderRegistry.shared.metadata[.antigravity]!,

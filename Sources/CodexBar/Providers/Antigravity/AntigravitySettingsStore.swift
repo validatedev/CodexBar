@@ -77,7 +77,9 @@ extension SettingsStore {
         guard let data = self.tokenAccountsData(for: .antigravity) else { return }
         guard let removed = data.accounts.first(where: { $0.id == accountID }) else { return }
         self.removeTokenAccount(provider: .antigravity, accountID: accountID)
-        AntigravityOAuthCredentialsStore.clear(accountLabel: removed.label)
+        if !KeychainAccessGate.isDisabled {
+            AntigravityOAuthCredentialsStore.clear(accountLabel: removed.label)
+        }
     }
 
     func addManualAntigravityTokenAccount(
@@ -87,22 +89,23 @@ extension SettingsStore {
     ) -> ProviderTokenAccount? {
         guard let normalizedLabel = AntigravityOAuthCredentialsStore.normalizedLabel(label) else { return nil }
 
+        let tokenValue: String
         if !KeychainAccessGate.isDisabled {
             let credentials = AntigravityOAuthCredentials(
                 accessToken: accessToken,
                 refreshToken: refreshToken,
                 expiresAt: nil,
                 email: normalizedLabel,
-                scopes: []
-            )
+                scopes: [])
             guard AntigravityOAuthCredentialsStore.save(credentials, accountLabel: normalizedLabel) else {
                 return nil
             }
+            tokenValue = normalizedLabel
+        } else {
+            tokenValue = AntigravityOAuthCredentialsStore.manualTokenValue(
+                accessToken: accessToken,
+                refreshToken: refreshToken)
         }
-
-        let tokenValue = AntigravityOAuthCredentialsStore.manualTokenValue(
-            accessToken: accessToken,
-            refreshToken: refreshToken)
 
         let existing = self.tokenAccountsData(for: .antigravity)
         var accounts = existing?.accounts ?? []

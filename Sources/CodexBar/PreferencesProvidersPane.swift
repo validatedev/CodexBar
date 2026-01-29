@@ -170,8 +170,8 @@ struct ProvidersPane: View {
 
         let supportsTwoFieldEntry = isAntigravity
         let supportsManualEntry = !isAntigravity || !keychainEnabled
-        let addActionTitle = (isAntigravity && keychainEnabled) ? "Sign in with Google" : nil
-        let addAction: (() async -> Void)? = (isAntigravity && keychainEnabled)
+        let addActionTitle = isAntigravity ? "Sign in with Google" : nil
+        let addAction: (() async -> Void)? = isAntigravity
             ? {
                 _ = await AntigravityLoginFlow.runOAuthFlow(
                     settings: self.settings,
