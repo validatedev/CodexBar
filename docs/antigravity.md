@@ -15,12 +15,12 @@ Antigravity supports OAuth-authorized Cloud Code quota and local language server
 
 - **Auto** (default): OAuth/manual first, fallback to local server
 - **OAuth**: OAuth/manual only
-- **Local**: local Antigravity language server only
+- **Local**: Antigravity local server only
 
 ## OAuth credentials
 
 - **Keychain**: stored from the OAuth browser flow
-- **Manual tokens**: stored in token accounts with `manual:` prefix (access `ya29.` + optional refresh `1//`)
+- **Manual tokens**: stored in token accounts with `manual:` prefix (access `ya29.` + optional refresh `1//`) when Keychain is disabled; otherwise saved to Keychain under the account label.
 - **Local import**: `~/Library/Application Support/Antigravity/User/globalStorage/state.vscdb`
   - refresh token: `jetskiStateSync.agentManagerInitState` (base64 protobuf, field 6 contains nested OAuthTokenInfo)
   - access token/email: `antigravityAuthStatus` JSON (`apiKey`, `email`)
@@ -31,6 +31,7 @@ Antigravity supports OAuth-authorized Cloud Code quota and local language server
 
 - `POST https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
 - `POST https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
+- `POST https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels` (fallback)
 - `POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`
 
 ## Local server data sources + fallback order

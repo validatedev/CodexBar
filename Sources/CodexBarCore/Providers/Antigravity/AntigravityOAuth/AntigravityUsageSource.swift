@@ -36,7 +36,7 @@ public enum AntigravityUsageSource: String, CaseIterable, Sendable, Codable {
         case .authorized:
             "Use OAuth account or manual tokens only"
         case .local:
-            "Use local Antigravity local server only"
+            "Use Antigravity local server only"
         }
     }
 }
