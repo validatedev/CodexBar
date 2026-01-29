@@ -72,7 +72,7 @@ struct AntigravityProviderImplementation: ProviderImplementation {
                     case .authorized:
                         return "OAuth: Use OAuth account or manual tokens only"
                     case .local:
-                        return "Local: Use local Antigravity language server only"
+                        return "Local: Use local Antigravity local server only"
                     }
                 },
                 binding: usageBinding,
