@@ -296,7 +296,9 @@ struct CLIArgumentError: LocalizedError {
         self.message = message
     }
 
-    var errorDescription: String? { self.message }
+    var errorDescription: String? {
+        self.message
+    }
 }
 
 #if DEBUG
