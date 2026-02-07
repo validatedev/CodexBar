@@ -135,24 +135,49 @@ struct ClaudeOAuthFetchStrategy: ProviderFetchStrategy {
     let id: String = "claude.oauth"
     let kind: ProviderFetchKind = .oauth
 
+    #if DEBUG
+    @TaskLocal static var nonInteractiveCredentialsOverride: ClaudeOAuthCredentials?
+    #endif
+
+    private func loadNonInteractiveCredentials(_ context: ProviderFetchContext) -> ClaudeOAuthCredentials? {
+        #if DEBUG
+        if let override = Self.nonInteractiveCredentialsOverride { return override }
+        #endif
+
+        return try? ClaudeOAuthCredentialsStore.load(
+            environment: context.env,
+            allowKeychainPrompt: false,
+            respectKeychainPromptCooldown: true)
+    }
+
     func isAvailable(_ context: ProviderFetchContext) async -> Bool {
-        // In OAuth-only mode, allow the fetch to run and prompt once when needed.
+        let nonInteractiveCredentials = self.loadNonInteractiveCredentials(context)
+        let hasRequiredScopeWithoutPrompt = nonInteractiveCredentials?.scopes.contains("user:profile") == true
+        if hasRequiredScopeWithoutPrompt, nonInteractiveCredentials?.isExpired == false {
+            // Gate controls refresh attempts, not use of already-valid access tokens.
+            return true
+        }
+
+        let shouldApplyOAuthRefreshFailureGate = context.runtime == .app
+            && (context.sourceMode == .auto || context.sourceMode == .oauth)
+        let hasEnvironmentOAuthToken = !(context.env[ClaudeOAuthCredentialsStore.environmentTokenKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ?? true)
+        if shouldApplyOAuthRefreshFailureGate, !hasEnvironmentOAuthToken {
+            guard ClaudeOAuthRefreshFailureGate.shouldAttempt() else { return false }
+        }
+        // In OAuth-only mode, allow the fetch to run (and prompt when needed) unless:
+        // - refresh is terminal-blocked due to an auth-specific rejection (e.g. invalid_grant), or
+        // - refresh is transiently backed off due to repeated 400/401 failures.
         guard context.sourceMode == .auto else { return true }
 
         // Prefer OAuth in Auto mode only when it’s plausibly usable:
         // - we can load credentials without prompting (env / CodexBar cache / credentials file) AND they meet the
         //   scope requirement, or
         // - Claude Code has stored OAuth creds in Keychain and we may be able to bootstrap (one prompt max).
-        if let creds = try? ClaudeOAuthCredentialsStore.load(
-            environment: context.env,
-            allowKeychainPrompt: false)
-        {
-            let hasRequiredScope = creds.scopes.contains("user:profile")
-            if hasRequiredScope {
-                if !creds.isExpired { return true }
-                let refreshToken = creds.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if !refreshToken.isEmpty { return true }
-            }
+        if let creds = nonInteractiveCredentials, hasRequiredScopeWithoutPrompt {
+            let refreshToken = creds.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !refreshToken.isEmpty { return true }
         }
         guard ClaudeOAuthKeychainAccessGate.shouldAllowPrompt() else { return false }
         return ClaudeOAuthCredentialsStore.hasClaudeKeychainCredentialsWithoutPrompt()

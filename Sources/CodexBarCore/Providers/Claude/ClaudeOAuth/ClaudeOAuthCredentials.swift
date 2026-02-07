@@ -4,6 +4,10 @@ import Foundation
 import FoundationNetworking
 #endif
 
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
+
 #if os(macOS)
 import LocalAuthentication
 import Security
@@ -119,7 +123,7 @@ public enum ClaudeOAuthCredentialsError: LocalizedError, Sendable {
         case let .readFailed(message):
             return "Claude OAuth credentials read failed: \(message)"
         case let .refreshFailed(message):
-            return "Claude OAuth token refresh failed: \(message). Run `claude` to re-authenticate."
+            return "Claude OAuth token refresh failed: \(message)"
         case .noRefreshToken:
             return "Claude OAuth refresh token missing. Run `claude` to authenticate."
         }
@@ -149,11 +153,33 @@ public enum ClaudeOAuthCredentialsStore {
     private static let log = CodexBarLog.logger(LogCategories.claudeUsage)
     private static let fileFingerprintKey = "ClaudeOAuthCredentialsFileFingerprintV1"
     private static let claudeKeychainPromptLock = NSLock()
+    private static let claudeKeychainFingerprintKey = "ClaudeOAuthClaudeKeychainFingerprintV2"
+    private static let claudeKeychainFingerprintLegacyKey = "ClaudeOAuthClaudeKeychainFingerprintV1"
+    private static let claudeKeychainChangeCheckLock = NSLock()
+    private nonisolated(unsafe) static var lastClaudeKeychainChangeCheckAt: Date?
+    private static let claudeKeychainChangeCheckMinimumInterval: TimeInterval = 60
+    private static let reauthenticateHint = "Run `claude` to re-authenticate."
+
+    struct ClaudeKeychainFingerprint: Codable, Equatable, Sendable {
+        let modifiedAt: Int?
+        let createdAt: Int?
+        let persistentRefHash: String?
+    }
 
     #if DEBUG
     private nonisolated(unsafe) static var keychainAccessOverride: Bool?
+    private nonisolated(unsafe) static var claudeKeychainDataOverride: Data?
+    private nonisolated(unsafe) static var claudeKeychainFingerprintOverride: ClaudeKeychainFingerprint?
     static func setKeychainAccessOverrideForTesting(_ disabled: Bool?) {
         self.keychainAccessOverride = disabled
+    }
+
+    static func setClaudeKeychainDataOverrideForTesting(_ data: Data?) {
+        self.claudeKeychainDataOverride = data
+    }
+
+    static func setClaudeKeychainFingerprintOverrideForTesting(_ fingerprint: ClaudeKeychainFingerprint?) {
+        self.claudeKeychainFingerprintOverride = fingerprint
     }
     #endif
 
@@ -192,6 +218,10 @@ public enum ClaudeOAuthCredentialsStore {
         allowKeychainPrompt: Bool = true,
         respectKeychainPromptCooldown: Bool = false) throws -> ClaudeOAuthCredentials
     {
+        // "Silent" keychain probes can still show UI on some macOS configurations. If the caller disallows prompts,
+        // always honor the Claude keychain access cooldown gate to prevent prompt storms in Auto-mode paths.
+        let shouldRespectKeychainPromptCooldownForSilentProbes = respectKeychainPromptCooldown || !allowKeychainPrompt
+
         if let credentials = self.loadFromEnvironment(environment) {
             return credentials
         }
@@ -204,6 +234,12 @@ public enum ClaudeOAuthCredentialsStore {
            Date().timeIntervalSince(timestamp) < self.memoryCacheValidityDuration,
            !cached.isExpired
         {
+            if let synced = self.syncWithClaudeKeychainIfChanged(
+                cached: cached,
+                respectKeychainPromptCooldown: shouldRespectKeychainPromptCooldownForSilentProbes)
+            {
+                return synced
+            }
             return cached
         }
 
@@ -217,6 +253,12 @@ public enum ClaudeOAuthCredentialsStore {
                 if creds.isExpired {
                     expiredCredentials = creds
                 } else {
+                    if let synced = self.syncWithClaudeKeychainIfChanged(
+                        cached: creds,
+                        respectKeychainPromptCooldown: shouldRespectKeychainPromptCooldownForSilentProbes)
+                    {
+                        return synced
+                    }
                     self.writeMemoryCache(credentials: creds, timestamp: Date())
                     return creds
                 }
@@ -251,33 +293,36 @@ public enum ClaudeOAuthCredentialsStore {
         }
 
         // 4. Fall back to Claude's keychain (may prompt user if allowed)
-        if allowKeychainPrompt {
-            let promptAllowed = !respectKeychainPromptCooldown || ClaudeOAuthKeychainAccessGate.shouldAllowPrompt()
-            if promptAllowed {
-                // Some macOS configurations still show the system keychain prompt even for our "silent" probes.
-                // Show the in-app pre-alert once before any Claude keychain access attempt when prompting is allowed.
+        let promptAllowed =
+            allowKeychainPrompt
+                && (!respectKeychainPromptCooldown || ClaudeOAuthKeychainAccessGate.shouldAllowPrompt())
+        if promptAllowed {
+            do {
                 self.claudeKeychainPromptLock.lock()
                 defer { self.claudeKeychainPromptLock.unlock() }
-                KeychainPromptHandler.handler?(
-                    KeychainPromptContext(
-                        kind: .claudeOAuth,
-                        service: self.claudeKeychainService,
-                        account: nil))
-                do {
-                    let keychainData = try self.loadFromClaudeKeychain()
-                    let creds = try ClaudeOAuthCredentials.parse(data: keychainData)
-                    self.writeMemoryCache(credentials: creds, timestamp: Date())
-                    self.saveToCacheKeychain(keychainData)
-                    return creds
-                } catch let error as ClaudeOAuthCredentialsError {
-                    if case .notFound = error {
-                        // Ignore missing entry
-                    } else {
-                        lastError = error
-                    }
-                } catch {
+
+                // Some macOS configurations still show the system keychain prompt even for our "silent" probes.
+                // Only show the in-app pre-alert when we have evidence that Keychain interaction is likely.
+                if self.shouldShowClaudeKeychainPreAlert() {
+                    KeychainPromptHandler.handler?(
+                        KeychainPromptContext(
+                            kind: .claudeOAuth,
+                            service: self.claudeKeychainService,
+                            account: nil))
+                }
+                let keychainData = try self.loadFromClaudeKeychain()
+                let creds = try ClaudeOAuthCredentials.parse(data: keychainData)
+                self.writeMemoryCache(credentials: creds, timestamp: Date())
+                self.saveToCacheKeychain(keychainData)
+                return creds
+            } catch let error as ClaudeOAuthCredentialsError {
+                if case .notFound = error {
+                    // Ignore missing entry
+                } else {
                     lastError = error
                 }
+            } catch {
+                lastError = error
             }
         }
 
@@ -326,67 +371,6 @@ public enum ClaudeOAuthCredentialsStore {
             self.log.error("Token refresh failed: \(error.localizedDescription)")
             throw error
         }
-    }
-
-    /// Refresh the access token using a refresh token.
-    /// Updates CodexBar's keychain cache with the new credentials.
-    public static func refreshAccessToken(
-        refreshToken: String,
-        existingScopes: [String],
-        existingRateLimitTier: String?) async throws -> ClaudeOAuthCredentials
-    {
-        guard let url = URL(string: self.tokenRefreshEndpoint) else {
-            throw ClaudeOAuthCredentialsError.refreshFailed("Invalid token endpoint URL")
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        var components = URLComponents()
-        components.queryItems = [
-            URLQueryItem(name: "grant_type", value: "refresh_token"),
-            URLQueryItem(name: "refresh_token", value: refreshToken),
-            URLQueryItem(name: "client_id", value: self.oauthClientID),
-        ]
-        request.httpBody = (components.percentEncodedQuery ?? "").data(using: .utf8)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw ClaudeOAuthCredentialsError.refreshFailed("Invalid response")
-        }
-
-        guard http.statusCode == 200 else {
-            if http.statusCode == 401 || http.statusCode == 400 {
-                // Refresh token is invalid/expired, or the request was rejected.
-                self.invalidateCache()
-                throw ClaudeOAuthCredentialsError.refreshFailed("HTTP \(http.statusCode)")
-            }
-            throw ClaudeOAuthCredentialsError.refreshFailed("HTTP \(http.statusCode)")
-        }
-
-        // Parse the token response
-        let tokenResponse = try JSONDecoder().decode(TokenRefreshResponse.self, from: data)
-
-        let expiresAt = Date(timeIntervalSinceNow: TimeInterval(tokenResponse.expiresIn))
-
-        let newCredentials = ClaudeOAuthCredentials(
-            accessToken: tokenResponse.accessToken,
-            refreshToken: tokenResponse.refreshToken ?? refreshToken,
-            expiresAt: expiresAt,
-            scopes: existingScopes,
-            rateLimitTier: existingRateLimitTier)
-
-        // Save to CodexBar's keychain cache (not Claude's keychain)
-        self.saveRefreshedCredentialsToCache(newCredentials)
-
-        // Update in-memory cache
-        self.writeMemoryCache(credentials: newCredentials, timestamp: Date())
-
-        return newCredentials
     }
 
     /// Save refreshed credentials to CodexBar's keychain cache
@@ -536,7 +520,183 @@ public enum ClaudeOAuthCredentialsStore {
         #endif
     }
 
+    private static func syncWithClaudeKeychainIfChanged(
+        cached: ClaudeOAuthCredentials,
+        respectKeychainPromptCooldown: Bool,
+        now: Date = Date()) -> ClaudeOAuthCredentials?
+    {
+        #if os(macOS)
+        if !self.keychainAccessAllowed { return nil }
+        if respectKeychainPromptCooldown,
+           !ClaudeOAuthKeychainAccessGate.shouldAllowPrompt(now: now)
+        {
+            return nil
+        }
+
+        if !self.shouldCheckClaudeKeychainChange(now: now) {
+            return nil
+        }
+
+        guard let currentFingerprint = self.currentClaudeKeychainFingerprintWithoutPrompt() else {
+            return nil
+        }
+        let storedFingerprint = self.loadClaudeKeychainFingerprint()
+        guard currentFingerprint != storedFingerprint else { return nil }
+
+        do {
+            guard let data = try self.loadFromClaudeKeychainNonInteractive() else {
+                return nil
+            }
+            guard let keychainCreds = try? ClaudeOAuthCredentials.parse(data: data) else {
+                self.saveClaudeKeychainFingerprint(currentFingerprint)
+                return nil
+            }
+            self.saveClaudeKeychainFingerprint(currentFingerprint)
+
+            // Only sync if token actually changed to avoid churn on unrelated keychain metadata updates.
+            guard keychainCreds.accessToken != cached.accessToken else { return nil }
+            // Avoid regressing a working cached token if the keychain entry looks invalid/expired.
+            if keychainCreds.isExpired, !cached.isExpired { return nil }
+
+            self.log.info("Claude keychain credentials changed; syncing OAuth cache")
+            self.writeMemoryCache(credentials: keychainCreds, timestamp: now)
+            self.saveToCacheKeychain(data)
+            return keychainCreds
+        } catch let error as ClaudeOAuthCredentialsError {
+            if case let .keychainError(status) = error,
+               status == Int(errSecUserCanceled)
+               || status == Int(errSecAuthFailed)
+               || status == Int(errSecInteractionNotAllowed)
+               || status == Int(errSecNoAccessForItem)
+            {
+                // Back off to avoid repeated keychain probes on systems that still show prompts.
+                ClaudeOAuthKeychainAccessGate.recordDenied(now: now)
+            }
+            return nil
+        } catch {
+            return nil
+        }
+        #else
+        _ = cached
+        _ = respectKeychainPromptCooldown
+        _ = now
+        return nil
+        #endif
+    }
+
+    private static func shouldCheckClaudeKeychainChange(now: Date = Date()) -> Bool {
+        self.claudeKeychainChangeCheckLock.lock()
+        defer { self.claudeKeychainChangeCheckLock.unlock() }
+        if let last = self.lastClaudeKeychainChangeCheckAt,
+           now.timeIntervalSince(last) < self.claudeKeychainChangeCheckMinimumInterval
+        {
+            return false
+        }
+        self.lastClaudeKeychainChangeCheckAt = now
+        return true
+    }
+
+    private static func loadClaudeKeychainFingerprint() -> ClaudeKeychainFingerprint? {
+        // Proactively remove the legacy V1 key (it included the keychain account string, which can be identifying).
+        UserDefaults.standard.removeObject(forKey: self.claudeKeychainFingerprintLegacyKey)
+
+        guard let data = UserDefaults.standard.data(forKey: self.claudeKeychainFingerprintKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(ClaudeKeychainFingerprint.self, from: data)
+    }
+
+    private static func saveClaudeKeychainFingerprint(_ fingerprint: ClaudeKeychainFingerprint?) {
+        // Proactively remove the legacy V1 key (it included the keychain account string, which can be identifying).
+        UserDefaults.standard.removeObject(forKey: self.claudeKeychainFingerprintLegacyKey)
+
+        guard let fingerprint else {
+            UserDefaults.standard.removeObject(forKey: self.claudeKeychainFingerprintKey)
+            return
+        }
+        if let data = try? JSONEncoder().encode(fingerprint) {
+            UserDefaults.standard.set(data, forKey: self.claudeKeychainFingerprintKey)
+        }
+    }
+
+    private static func currentClaudeKeychainFingerprintWithoutPrompt() -> ClaudeKeychainFingerprint? {
+        #if DEBUG
+        if let override = self.claudeKeychainFingerprintOverride { return override }
+        #endif
+        #if os(macOS)
+        let newest: ClaudeKeychainCandidate? = self.claudeKeychainCandidatesWithoutPrompt().first
+            ?? self.claudeKeychainLegacyCandidateWithoutPrompt()
+        guard let newest else { return nil }
+
+        let modifiedAt = newest.modifiedAt.map { Int($0.timeIntervalSince1970) }
+        let createdAt = newest.createdAt.map { Int($0.timeIntervalSince1970) }
+        let persistentRefHash = Self.sha256Prefix(newest.persistentRef)
+        return ClaudeKeychainFingerprint(
+            modifiedAt: modifiedAt,
+            createdAt: createdAt,
+            persistentRefHash: persistentRefHash)
+        #else
+        return nil
+        #endif
+    }
+
+    static func currentClaudeKeychainFingerprintWithoutPromptForAuthGate() -> ClaudeKeychainFingerprint? {
+        self.currentClaudeKeychainFingerprintWithoutPrompt()
+    }
+
+    static func currentCredentialsFileFingerprintWithoutPromptForAuthGate() -> String? {
+        guard let fingerprint = self.currentFileFingerprint() else { return nil }
+        let modifiedAt = fingerprint.modifiedAt ?? 0
+        return "\(modifiedAt):\(fingerprint.size)"
+    }
+
+    private static func sha256Prefix(_ data: Data) -> String? {
+        #if canImport(CryptoKit)
+        let digest = SHA256.hash(data: data)
+        let hex = digest.compactMap { String(format: "%02x", $0) }.joined()
+        return String(hex.prefix(12))
+        #else
+        _ = data
+        return nil
+        #endif
+    }
+
+    private static func loadFromClaudeKeychainNonInteractive() throws -> Data? {
+        #if DEBUG
+        if let override = self.claudeKeychainDataOverride { return override }
+        #endif
+        #if os(macOS)
+        if !self.keychainAccessAllowed {
+            return nil
+        }
+
+        // Keep semantics aligned with fingerprinting: if there are multiple entries, we only ever consult the newest
+        // candidate (same as currentClaudeKeychainFingerprintWithoutPrompt()) to avoid syncing from a different item.
+        let candidates = self.claudeKeychainCandidatesWithoutPrompt()
+        if let newest = candidates.first {
+            if let data = try self.loadClaudeKeychainData(candidate: newest, allowKeychainPrompt: false),
+               !data.isEmpty
+            {
+                return data
+            }
+            return nil
+        }
+
+        if let data = try self.loadClaudeKeychainLegacyData(allowKeychainPrompt: false),
+           !data.isEmpty
+        {
+            return data
+        }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
     public static func loadFromClaudeKeychain() throws -> Data {
+        #if DEBUG
+        if let override = self.claudeKeychainDataOverride { return override }
+        #endif
         #if os(macOS)
         if !self.keychainAccessAllowed {
             throw ClaudeOAuthCredentialsError.notFound
@@ -631,6 +791,28 @@ public enum ClaudeOAuthCredentialsStore {
             let rhsDate = rhs.modifiedAt ?? rhs.createdAt ?? Date.distantPast
             return lhsDate > rhsDate
         }
+    }
+
+    private static func claudeKeychainLegacyCandidateWithoutPrompt() -> ClaudeKeychainCandidate? {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: self.claudeKeychainService,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnAttributes as String: true,
+            kSecReturnPersistentRef as String: true,
+        ]
+        KeychainNoUIQuery.apply(to: &query)
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return nil }
+        guard let row = result as? [String: Any] else { return nil }
+        guard let persistentRef = row[kSecValuePersistentRef as String] as? Data else { return nil }
+        return ClaudeKeychainCandidate(
+            persistentRef: persistentRef,
+            account: row[kSecAttrAccount as String] as? String,
+            modifiedAt: row[kSecAttrModificationDate as String] as? Date,
+            createdAt: row[kSecAttrCreationDate as String] as? Date)
     }
 
     private static func loadClaudeKeychainData(
@@ -795,10 +977,163 @@ public enum ClaudeOAuthCredentialsStore {
     static func _resetCredentialsFileTrackingForTesting() {
         UserDefaults.standard.removeObject(forKey: self.fileFingerprintKey)
     }
+
+    static func _resetClaudeKeychainChangeTrackingForTesting() {
+        UserDefaults.standard.removeObject(forKey: self.claudeKeychainFingerprintKey)
+        UserDefaults.standard.removeObject(forKey: self.claudeKeychainFingerprintLegacyKey)
+        self.setClaudeKeychainDataOverrideForTesting(nil)
+        self.setClaudeKeychainFingerprintOverrideForTesting(nil)
+        self.claudeKeychainChangeCheckLock.lock()
+        self.lastClaudeKeychainChangeCheckAt = nil
+        self.claudeKeychainChangeCheckLock.unlock()
+    }
+
+    static func _resetClaudeKeychainChangeThrottleForTesting() {
+        self.claudeKeychainChangeCheckLock.lock()
+        self.lastClaudeKeychainChangeCheckAt = nil
+        self.claudeKeychainChangeCheckLock.unlock()
+    }
     #endif
 
     private static func defaultCredentialsURL() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(self.credentialsPath)
     }
+}
+
+extension ClaudeOAuthCredentialsStore {
+    private static func shouldShowClaudeKeychainPreAlert() -> Bool {
+        switch KeychainAccessPreflight.checkGenericPassword(service: self.claudeKeychainService, account: nil) {
+        case .interactionRequired:
+            true
+        case .failure:
+            // If preflight fails, we can't be sure whether interaction is required (or if the preflight itself
+            // is impacted by a misbehaving Keychain configuration). Be conservative and show the pre-alert.
+            true
+        case .allowed, .notFound:
+            false
+        }
+    }
+
+    /// Refresh the access token using a refresh token.
+    /// Updates CodexBar's keychain cache with the new credentials.
+    public static func refreshAccessToken(
+        refreshToken: String,
+        existingScopes: [String],
+        existingRateLimitTier: String?) async throws -> ClaudeOAuthCredentials
+    {
+        guard ClaudeOAuthRefreshFailureGate.shouldAttempt() else {
+            let status = ClaudeOAuthRefreshFailureGate.currentBlockStatus()
+            let message = switch status {
+            case .terminal:
+                "Claude OAuth refresh blocked until auth changes. \(self.reauthenticateHint)"
+            case .transient:
+                "Claude OAuth refresh temporarily backed off due to prior failures; will retry automatically."
+            case nil:
+                "Claude OAuth refresh temporarily suppressed due to prior failures; will retry automatically."
+            }
+            throw ClaudeOAuthCredentialsError.refreshFailed(message)
+        }
+
+        guard let url = URL(string: self.tokenRefreshEndpoint) else {
+            throw ClaudeOAuthCredentialsError.refreshFailed("Invalid token endpoint URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        var components = URLComponents()
+        components.queryItems = [
+            URLQueryItem(name: "grant_type", value: "refresh_token"),
+            URLQueryItem(name: "refresh_token", value: refreshToken),
+            URLQueryItem(name: "client_id", value: self.oauthClientID),
+        ]
+        request.httpBody = (components.percentEncodedQuery ?? "").data(using: .utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let http = response as? HTTPURLResponse else {
+            throw ClaudeOAuthCredentialsError.refreshFailed("Invalid response")
+        }
+
+        guard http.statusCode == 200 else {
+            if let disposition = self.refreshFailureDisposition(statusCode: http.statusCode, data: data) {
+                let oauthError = self.extractOAuthErrorCode(from: data)
+                self.log.info(
+                    "Claude OAuth refresh rejected",
+                    metadata: [
+                        "httpStatus": "\(http.statusCode)",
+                        "oauthError": oauthError ?? "nil",
+                        "disposition": disposition.rawValue,
+                    ])
+
+                switch disposition {
+                case .terminalInvalidGrant:
+                    ClaudeOAuthRefreshFailureGate.recordTerminalAuthFailure()
+                    self.invalidateCache()
+                    throw ClaudeOAuthCredentialsError.refreshFailed(
+                        "HTTP \(http.statusCode) invalid_grant. \(self.reauthenticateHint)")
+                case .transientBackoff:
+                    ClaudeOAuthRefreshFailureGate.recordTransientFailure()
+                    let suffix = oauthError.map { " (\($0))" } ?? ""
+                    throw ClaudeOAuthCredentialsError.refreshFailed("HTTP \(http.statusCode)\(suffix)")
+                }
+            }
+            throw ClaudeOAuthCredentialsError.refreshFailed("HTTP \(http.statusCode)")
+        }
+
+        // Parse the token response
+        let tokenResponse = try JSONDecoder().decode(TokenRefreshResponse.self, from: data)
+
+        let expiresAt = Date(timeIntervalSinceNow: TimeInterval(tokenResponse.expiresIn))
+
+        let newCredentials = ClaudeOAuthCredentials(
+            accessToken: tokenResponse.accessToken,
+            refreshToken: tokenResponse.refreshToken ?? refreshToken,
+            expiresAt: expiresAt,
+            scopes: existingScopes,
+            rateLimitTier: existingRateLimitTier)
+
+        // Save to CodexBar's keychain cache (not Claude's keychain)
+        self.saveRefreshedCredentialsToCache(newCredentials)
+
+        // Update in-memory cache
+        self.writeMemoryCache(credentials: newCredentials, timestamp: Date())
+        ClaudeOAuthRefreshFailureGate.recordSuccess()
+
+        return newCredentials
+    }
+
+    private enum RefreshFailureDisposition: String, Sendable {
+        case terminalInvalidGrant
+        case transientBackoff
+    }
+
+    private static func extractOAuthErrorCode(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json["error"] as? String
+    }
+
+    private static func refreshFailureDisposition(statusCode: Int, data: Data) -> RefreshFailureDisposition? {
+        guard statusCode == 400 || statusCode == 401 else { return nil }
+        if let error = self.extractOAuthErrorCode(from: data)?.lowercased(), error == "invalid_grant" {
+            return .terminalInvalidGrant
+        }
+        return .transientBackoff
+    }
+
+    #if DEBUG
+    static func extractOAuthErrorCodeForTesting(from data: Data) -> String? {
+        self.extractOAuthErrorCode(from: data)
+    }
+
+    static func refreshFailureDispositionForTesting(statusCode: Int, data: Data) -> String? {
+        self.refreshFailureDisposition(statusCode: statusCode, data: data)?.rawValue
+    }
+    #endif
 }
