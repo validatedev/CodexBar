@@ -170,10 +170,9 @@ struct ProvidersPane: View {
         let context = self.makeSettingsContext(provider: provider)
 
         let isAntigravity = provider == .antigravity
-        let keychainEnabled = !KeychainAccessGate.isDisabled
 
         let supportsTwoFieldEntry = isAntigravity
-        let supportsManualEntry = !isAntigravity || !keychainEnabled
+        let supportsManualEntry = true
         let addActionTitle = isAntigravity ? "Sign in with Google" : nil
         let addAction: (() async -> Void)? = isAntigravity
             ? {
