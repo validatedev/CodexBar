@@ -170,10 +170,11 @@ public enum AntigravityLocalImporter {
         guard openStatus == SQLITE_OK, let db else {
             let sysErrno = db.map { sqlite3_system_errno($0) } ?? 0
             if let db { sqlite3_close(db) }
-            if openStatus == SQLITE_CANTOPEN, (sysErrno == EPERM || sysErrno == EACCES) {
+            if openStatus == SQLITE_CANTOPEN, sysErrno == EPERM || sysErrno == EACCES {
                 throw AntigravityOAuthCredentialsError.permissionDenied
             }
-            throw AntigravityOAuthCredentialsError.decodeFailed("Failed to open state.vscdb: \(openStatus), errno: \(sysErrno)")
+            throw AntigravityOAuthCredentialsError
+                .decodeFailed("Failed to open state.vscdb: \(openStatus), errno: \(sysErrno)")
         }
         defer { sqlite3_close(db) }
 

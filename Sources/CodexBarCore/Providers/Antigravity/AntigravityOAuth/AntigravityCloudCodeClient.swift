@@ -325,7 +325,7 @@ public enum AntigravityCloudCodeClient {
     /// but `retrieveUserQuota` returns IDs like "gemini-2.5-pro" without "low".
     private static func displayLabel(for modelId: String) -> String {
         let lower = modelId.lowercased()
-        if lower.contains("pro") && !lower.contains("low") {
+        if lower.contains("pro"), !lower.contains("low") {
             return modelId + " (Low)"
         }
         return modelId

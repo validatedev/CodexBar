@@ -332,7 +332,7 @@ struct ProvidersPane: View {
         } catch {
             log.debug("Import failed with error: \(error)")
             let nsError = error as NSError
-            if nsError.domain == NSPOSIXErrorDomain, (nsError.code == 1 || nsError.code == 13) {
+            if nsError.domain == NSPOSIXErrorDomain, nsError.code == 1 || nsError.code == 13 {
                 self.presentFullDiskAccessAlert()
             } else {
                 self.presentAlert(

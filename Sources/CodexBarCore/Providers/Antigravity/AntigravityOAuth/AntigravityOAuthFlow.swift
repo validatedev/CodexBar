@@ -182,7 +182,6 @@ public actor AntigravityOAuthFlow {
             email: email,
             scopes: AntigravityOAuthConfig.scopes)
     }
-
 }
 
 private final class CallbackServer: @unchecked Sendable {
@@ -315,5 +314,4 @@ private final class CallbackServer: @unchecked Sendable {
 
         return (code, state)
     }
-
 }
