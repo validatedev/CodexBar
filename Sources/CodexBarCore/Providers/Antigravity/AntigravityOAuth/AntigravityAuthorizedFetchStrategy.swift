@@ -71,7 +71,45 @@ public struct AntigravityAuthorizedFetchStrategy: ProviderFetchStrategy {
         credentials: AntigravityOAuthCredentials,
         sourceLabel: String) async throws -> ProviderFetchResult
     {
-        let quota = try await AntigravityCloudCodeClient.fetchQuota(accessToken: credentials.accessToken)
+        var projectId: String?
+        do {
+            let info = try await AntigravityCloudCodeClient.loadProjectInfo(
+                accessToken: credentials.accessToken)
+            projectId = info.projectId
+            Self.log.debug("Bootstrapped project ID: \(projectId ?? "nil")")
+        } catch AntigravityOAuthCredentialsError.invalidGrant {
+            throw AntigravityOAuthCredentialsError.invalidGrant
+        } catch {
+            Self.log.info("Project bootstrap failed (non-fatal): \(error.localizedDescription)")
+        }
+
+        let quota: AntigravityCloudCodeQuota
+        do {
+            let primary = try await AntigravityCloudCodeClient.fetchQuota(
+                accessToken: credentials.accessToken,
+                projectId: projectId)
+            if primary.models.isEmpty {
+                Self.log.info("fetchAvailableModels returned empty models, trying retrieveUserQuota")
+                quota = try await AntigravityCloudCodeClient.retrieveUserQuota(
+                    accessToken: credentials.accessToken,
+                    projectId: projectId)
+            } else {
+                quota = primary
+            }
+        } catch AntigravityOAuthCredentialsError.invalidGrant {
+            throw AntigravityOAuthCredentialsError.invalidGrant
+        } catch let primaryError {
+            Self.log.info("fetchAvailableModels failed, trying retrieveUserQuota: \(primaryError.localizedDescription)")
+            do {
+                quota = try await AntigravityCloudCodeClient.retrieveUserQuota(
+                    accessToken: credentials.accessToken,
+                    projectId: projectId)
+            } catch {
+                Self.log.warning("retrieveUserQuota fallback also failed: \(error.localizedDescription)")
+                throw primaryError
+            }
+        }
+
         Self.log.debug("Successfully fetched quota from Cloud Code API")
 
         let snapshot = AntigravityStatusSnapshot(

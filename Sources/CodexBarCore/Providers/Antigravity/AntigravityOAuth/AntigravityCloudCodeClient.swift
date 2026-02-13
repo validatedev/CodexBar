@@ -12,6 +12,7 @@ public enum AntigravityCloudCodeConfig {
 
     public static let fetchAvailableModelsPath = "/v1internal:fetchAvailableModels"
     public static let loadCodeAssistPath = "/v1internal:loadCodeAssist"
+    public static let retrieveUserQuotaPath = "/v1internal:retrieveUserQuota"
     public static let onboardUserPath = "/v1internal:onboardUser"
     public static let userAgent = "antigravity"
 
@@ -47,6 +48,18 @@ public enum AntigravityCloudCodeClient {
     {
         try await self.requestWithRetry { baseURL in
             try await self.fetchQuotaFromEndpoint(
+                baseURL: baseURL,
+                accessToken: accessToken,
+                projectId: projectId)
+        }
+    }
+
+    public static func retrieveUserQuota(
+        accessToken: String,
+        projectId: String? = nil) async throws -> AntigravityCloudCodeQuota
+    {
+        try await self.requestWithRetry { baseURL in
+            try await self.retrieveUserQuotaFromEndpoint(
                 baseURL: baseURL,
                 accessToken: accessToken,
                 projectId: projectId)
@@ -115,6 +128,25 @@ public enum AntigravityCloudCodeClient {
 
         let data = try await self.makeRequest(url: url, body: requestBody, accessToken: accessToken)
         return try self.parseQuotaResponse(data: data)
+    }
+
+    private static func retrieveUserQuotaFromEndpoint(
+        baseURL: String,
+        accessToken: String,
+        projectId: String?) async throws -> AntigravityCloudCodeQuota
+    {
+        let urlString = baseURL + AntigravityCloudCodeConfig.retrieveUserQuotaPath
+        guard let url = URL(string: urlString) else {
+            throw AntigravityOAuthCredentialsError.networkError("Invalid Cloud Code URL")
+        }
+
+        var requestBody: [String: Any] = [:]
+        if let projectId {
+            requestBody["project"] = projectId
+        }
+
+        let data = try await self.makeRequest(url: url, body: requestBody, accessToken: accessToken)
+        return try self.parseUserQuotaResponse(data: data)
     }
 
     private static func loadProjectInfoFromEndpoint(
@@ -233,5 +265,69 @@ public enum AntigravityCloudCodeClient {
             remainingFraction: remainingFraction,
             resetTime: resetTime,
             resetDescription: nil)
+    }
+
+    // MARK: - retrieveUserQuota parsing
+
+    private struct UserQuotaBucket: Decodable {
+        let remainingFraction: Double?
+        let resetTime: String?
+        let modelId: String?
+        let tokenType: String?
+    }
+
+    private struct UserQuotaResponse: Decodable {
+        let buckets: [UserQuotaBucket]?
+    }
+
+    private static func parseUserQuotaResponse(data: Data) throws -> AntigravityCloudCodeQuota {
+        let decoder = JSONDecoder()
+        let response = try decoder.decode(UserQuotaResponse.self, from: data)
+
+        guard let buckets = response.buckets, !buckets.isEmpty else {
+            throw AntigravityOAuthCredentialsError.decodeFailed("No quota buckets in retrieveUserQuota response")
+        }
+
+        // Group by modelId, keeping lowest remainingFraction per model
+        var modelQuotaMap: [String: (fraction: Double, resetString: String?)] = [:]
+        for bucket in buckets {
+            guard let modelId = bucket.modelId, let fraction = bucket.remainingFraction else { continue }
+            if let existing = modelQuotaMap[modelId] {
+                if fraction < existing.fraction {
+                    modelQuotaMap[modelId] = (fraction, bucket.resetTime)
+                }
+            } else {
+                modelQuotaMap[modelId] = (fraction, bucket.resetTime)
+            }
+        }
+
+        let models = modelQuotaMap
+            .sorted { $0.key < $1.key }
+            .map { modelId, info -> AntigravityModelQuota in
+                let resetDate: Date? = info.resetString.flatMap { str in
+                    if let d = ISO8601DateFormatter().date(from: str) { return d }
+                    if let seconds = Double(str) { return Date(timeIntervalSince1970: seconds) }
+                    return nil
+                }
+                return AntigravityModelQuota(
+                    label: self.displayLabel(for: modelId),
+                    modelId: modelId,
+                    remainingFraction: info.fraction,
+                    resetTime: resetDate,
+                    resetDescription: nil)
+            }
+
+        return AntigravityCloudCodeQuota(models: models, email: nil, projectId: nil)
+    }
+
+    /// Maps a raw `modelId` to a display label compatible with `selectModels()`.
+    /// The `isGeminiProLow` matcher requires both "pro" and "low" in the label,
+    /// but `retrieveUserQuota` returns IDs like "gemini-2.5-pro" without "low".
+    private static func displayLabel(for modelId: String) -> String {
+        let lower = modelId.lowercased()
+        if lower.contains("pro") && !lower.contains("low") {
+            return modelId + " (Low)"
+        }
+        return modelId
     }
 }

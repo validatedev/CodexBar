@@ -33,6 +33,13 @@ Antigravity supports OAuth-authorized Cloud Code quota and local language server
 - `POST https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
 - `POST https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels` (fallback)
 - `POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`
+- `POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota` (fallback for fetchAvailableModels)
+
+## Authorized fetch flow
+
+1. Best-effort `loadCodeAssist` to bootstrap `projectId`
+2. `fetchAvailableModels` with `projectId` (primary)
+3. `retrieveUserQuota` with `projectId` (fallback if primary returns empty or fails)
 
 ## Local server data sources + fallback order
 
