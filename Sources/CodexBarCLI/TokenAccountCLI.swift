@@ -135,6 +135,11 @@ struct TokenAccountCLIContext {
                 amp: ProviderSettingsSnapshot.AmpProviderSettings(
                     cookieSource: cookieSource,
                     manualCookieHeader: cookieHeader))
+        case .ollama:
+            return self.makeSnapshot(
+                ollama: ProviderSettingsSnapshot.OllamaProviderSettings(
+                    cookieSource: cookieSource,
+                    manualCookieHeader: cookieHeader))
         case .kimi:
             return self.makeSnapshot(
                 kimi: ProviderSettingsSnapshot.KimiProviderSettings(
@@ -155,7 +160,7 @@ struct TokenAccountCLIContext {
                     usageSource: usageSource,
                     accountLabel: account?.label,
                     tokenAccounts: config?.tokenAccounts))
-        case .gemini, .copilot, .kiro, .vertexai, .kimik2, .synthetic, .warp:
+        case .gemini, .copilot, .kiro, .vertexai, .kimik2, .synthetic, .openrouter, .warp:
             return nil
         }
     }
@@ -171,6 +176,7 @@ struct TokenAccountCLIContext {
         kimi: ProviderSettingsSnapshot.KimiProviderSettings? = nil,
         augment: ProviderSettingsSnapshot.AugmentProviderSettings? = nil,
         amp: ProviderSettingsSnapshot.AmpProviderSettings? = nil,
+        ollama: ProviderSettingsSnapshot.OllamaProviderSettings? = nil,
         jetbrains: ProviderSettingsSnapshot.JetBrainsProviderSettings? = nil,
         antigravity: ProviderSettingsSnapshot.AntigravityProviderSettings? = nil) -> ProviderSettingsSnapshot
     {
@@ -185,6 +191,7 @@ struct TokenAccountCLIContext {
             kimi: kimi,
             augment: augment,
             amp: amp,
+            ollama: ollama,
             jetbrains: jetbrains,
             antigravity: antigravity)
     }
@@ -225,15 +232,7 @@ struct TokenAccountCLIContext {
             accountEmail: resolvedEmail,
             accountOrganization: existing?.accountOrganization,
             loginMethod: existing?.loginMethod)
-        return UsageSnapshot(
-            primary: snapshot.primary,
-            secondary: snapshot.secondary,
-            tertiary: snapshot.tertiary,
-            providerCost: snapshot.providerCost,
-            zaiUsage: snapshot.zaiUsage,
-            cursorRequests: snapshot.cursorRequests,
-            updatedAt: snapshot.updatedAt,
-            identity: identity)
+        return snapshot.withIdentity(identity)
     }
 
     func effectiveSourceMode(
@@ -283,13 +282,13 @@ struct TokenAccountCLIContext {
         account: ProviderTokenAccount?,
         config: ProviderConfig?) -> ProviderCookieSource
     {
-        if let override = config?.cookieSource { return override }
         if let account, TokenAccountSupportCatalog.support(for: provider)?.requiresManualCookieSource == true {
             if provider == .claude, TokenAccountSupportCatalog.isClaudeOAuthToken(account.token) {
                 return .off
             }
             return .manual
         }
+        if let override = config?.cookieSource { return override }
         if config?.sanitizedCookieHeader != nil {
             return .manual
         }
