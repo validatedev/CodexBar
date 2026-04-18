@@ -25,6 +25,15 @@ public enum AntigravityLocalImporter {
 
     private static let log = CodexBarLog.logger(LogCategories.antigravity)
 
+    // Current Antigravity builds wrap OAuth state inside antigravityUnifiedStateSync.* keys.
+    // Older builds used jetskiStateSync.agentManagerInitState / antigravityAuthStatus.
+    private static let unifiedOAuthTokenKey = "antigravityUnifiedStateSync.oauthToken"
+    private static let unifiedUserStatusKey = "antigravityUnifiedStateSync.userStatus"
+    private static let legacyAgentManagerInitStateKey = "jetskiStateSync.agentManagerInitState"
+    private static let legacyAuthStatusKey = "antigravityAuthStatus"
+    private static let oauthTokenSentinel = "oauthTokenInfoSentinelKey"
+    private static let userStatusSentinel = "userStatusSentinelKey"
+
     public static func stateDbPath() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home
@@ -136,8 +145,12 @@ public enum AntigravityLocalImporter {
     }
 
     private static func readAuthStatus(dbPath: URL) throws -> AuthStatus {
-        self.log.debug("Reading antigravityAuthStatus from DB")
-        let json = try self.readStateValue(dbPath: dbPath, key: "antigravityAuthStatus")
+        if let unified = try? self.readUnifiedUserStatus(dbPath: dbPath) {
+            return unified
+        }
+
+        self.log.debug("Reading legacy antigravityAuthStatus JSON from DB")
+        let json = try self.readStateValue(dbPath: dbPath, key: Self.legacyAuthStatusKey)
         guard let data = json.data(using: .utf8),
               let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
@@ -151,9 +164,36 @@ public enum AntigravityLocalImporter {
         return AuthStatus(apiKey: apiKey, email: email, name: name)
     }
 
+    private static func readUnifiedUserStatus(dbPath: URL) throws -> AuthStatus {
+        self.log.debug("Reading antigravityUnifiedStateSync.userStatus from DB")
+        let base64 = try self.readStateValue(dbPath: dbPath, key: Self.unifiedUserStatusKey)
+        let inner = try self.unwrapSentinelPayload(base64Text: base64, expectedSentinel: Self.userStatusSentinel)
+
+        var name: String?
+        var email: String?
+        for field in ProtobufWireReader(data: inner) {
+            guard case let .lengthDelimited(number, value) = field else { continue }
+            switch number {
+            case 3: name = String(data: value, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            case 7: email = String(data: value, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            default: continue
+            }
+        }
+
+        if (name == nil || name?.isEmpty == true) && (email == nil || email?.isEmpty == true) {
+            throw AntigravityOAuthCredentialsError.decodeFailed("userStatus contained no name or email")
+        }
+
+        return AuthStatus(apiKey: nil, email: email, name: name)
+    }
+
     private static func readProtoTokenInfo(dbPath: URL) throws -> ProtoTokenInfo {
-        self.log.debug("Reading jetskiStateSync.agentManagerInitState from DB")
-        let base64 = try self.readStateValue(dbPath: dbPath, key: "jetskiStateSync.agentManagerInitState")
+        if let unified = try? self.readUnifiedOAuthToken(dbPath: dbPath) {
+            return unified
+        }
+
+        self.log.debug("Reading legacy jetskiStateSync.agentManagerInitState from DB")
+        let base64 = try self.readStateValue(dbPath: dbPath, key: Self.legacyAgentManagerInitStateKey)
         Self.log.debug("Read base64 value, length: \(base64.count)")
 
         guard let data = Data(base64Encoded: base64.trimmingCharacters(in: .whitespacesAndNewlines)) else {
@@ -161,7 +201,74 @@ public enum AntigravityLocalImporter {
         }
         Self.log.debug("Decoded base64, data length: \(data.count)")
 
-        return try self.parseProtoTokenInfo(data: data)
+        let state = try AgentManagerInitState(serializedBytes: data)
+        guard state.hasOauthToken else {
+            throw AntigravityOAuthCredentialsError.decodeFailed("No oauth_token field found")
+        }
+        return self.makeProtoTokenInfo(from: state.oauthToken)
+    }
+
+    private static func readUnifiedOAuthToken(dbPath: URL) throws -> ProtoTokenInfo {
+        self.log.debug("Reading antigravityUnifiedStateSync.oauthToken from DB")
+        let base64 = try self.readStateValue(dbPath: dbPath, key: Self.unifiedOAuthTokenKey)
+        let inner = try self.unwrapSentinelPayload(base64Text: base64, expectedSentinel: Self.oauthTokenSentinel)
+        let oauth = try OAuthTokenInfo(serializedBytes: inner)
+        return self.makeProtoTokenInfo(from: oauth)
+    }
+
+    private static func makeProtoTokenInfo(from oauth: OAuthTokenInfo) -> ProtoTokenInfo {
+        var expirySeconds: Int?
+        if oauth.hasExpiry {
+            expirySeconds = Int(oauth.expiry.seconds)
+        }
+        return ProtoTokenInfo(
+            accessToken: oauth.accessToken.isEmpty ? nil : oauth.accessToken,
+            refreshToken: oauth.refreshToken.isEmpty ? nil : oauth.refreshToken,
+            tokenType: oauth.tokenType.isEmpty ? nil : oauth.tokenType,
+            expirySeconds: expirySeconds)
+    }
+
+    /// Antigravity's unified-state payload is double-wrapped: the DB value base64-decodes to a
+    /// protobuf whose field 1 is a wrapper carrying a sentinel string (field 1) and a payload
+    /// (field 2) whose field 1 is itself a base64-encoded protobuf of the real message.
+    private static func unwrapSentinelPayload(base64Text: String, expectedSentinel: String) throws -> Data {
+        let trimmed = base64Text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let outer = Data(base64Encoded: trimmed) else {
+            throw AntigravityOAuthCredentialsError.decodeFailed("Invalid base64 in unified state value")
+        }
+
+        guard let wrapper = ProtobufWireReader.firstLengthDelimited(in: outer, fieldNumber: 1) else {
+            throw AntigravityOAuthCredentialsError.decodeFailed("Missing wrapper field in unified state")
+        }
+
+        var sentinel: String?
+        var payload: Data?
+        for field in ProtobufWireReader(data: wrapper) {
+            guard case let .lengthDelimited(number, value) = field else { continue }
+            if number == 1, sentinel == nil {
+                sentinel = String(data: value, encoding: .utf8)
+            } else if number == 2, payload == nil {
+                payload = value
+            }
+        }
+
+        guard sentinel == expectedSentinel, let payload else {
+            throw AntigravityOAuthCredentialsError.decodeFailed(
+                "Unexpected sentinel \(sentinel ?? "nil") (expected \(expectedSentinel))")
+        }
+
+        guard let innerBase64Bytes = ProtobufWireReader.firstLengthDelimited(in: payload, fieldNumber: 1) else {
+            throw AntigravityOAuthCredentialsError.decodeFailed("Missing inner payload for \(expectedSentinel)")
+        }
+
+        guard let innerText = String(data: innerBase64Bytes, encoding: .utf8),
+              let decoded = Data(base64Encoded: innerText.trimmingCharacters(in: .whitespacesAndNewlines))
+        else {
+            throw AntigravityOAuthCredentialsError
+                .decodeFailed("Inner payload is not valid base64 for \(expectedSentinel)")
+        }
+
+        return decoded
     }
 
     private static func readStateValue(dbPath: URL, key: String) throws -> String {
@@ -207,41 +314,93 @@ public enum AntigravityLocalImporter {
 
         return value
     }
+}
 
-    private static func parseProtoTokenInfo(data: Data) throws -> ProtoTokenInfo {
-        self.log.debug("Parsing protobuf data using swift-protobuf")
+/// Minimal protobuf wire-format reader for unwrapping Antigravity's sentinel envelopes without
+/// introducing additional generated messages.
+private struct ProtobufWireReader: Sequence, IteratorProtocol {
+    enum Field {
+        case varint(fieldNumber: Int, value: UInt64)
+        case lengthDelimited(fieldNumber: Int, value: Data)
+        case fixed64(fieldNumber: Int, value: UInt64)
+        case fixed32(fieldNumber: Int, value: UInt32)
+    }
 
-        do {
-            let state = try AgentManagerInitState(serializedBytes: data)
-            Self.log.debug("Successfully parsed AgentManagerInitState")
+    private let data: Data
+    private var offset: Int
 
-            guard state.hasOauthToken else {
-                Self.log.debug("No oauth_token field (field 6) found in protobuf")
-                throw AntigravityOAuthCredentialsError.decodeFailed("No oauth_token field found")
+    init(data: Data) {
+        self.data = data
+        self.offset = 0
+    }
+
+    static func firstLengthDelimited(in data: Data, fieldNumber: Int) -> Data? {
+        for field in ProtobufWireReader(data: data) {
+            if case let .lengthDelimited(number, value) = field, number == fieldNumber {
+                return value
             }
-
-            let oauthToken = state.oauthToken
-            Self.log.debug(
-                """
-                Found OAuthTokenInfo - access_token length: \(oauthToken.accessToken.count), \
-                refresh_token length: \(oauthToken.refreshToken.count)
-                """)
-
-            var expirySeconds: Int?
-            if oauthToken.hasExpiry {
-                expirySeconds = Int(oauthToken.expiry.seconds)
-                Self.log.debug("Token expiry: \(expirySeconds!) seconds since epoch")
-            }
-
-            return ProtoTokenInfo(
-                accessToken: oauthToken.accessToken.isEmpty ? nil : oauthToken.accessToken,
-                refreshToken: oauthToken.refreshToken.isEmpty ? nil : oauthToken.refreshToken,
-                tokenType: oauthToken.tokenType.isEmpty ? nil : oauthToken.tokenType,
-                expirySeconds: expirySeconds)
-        } catch {
-            self.log.debug("Protobuf parsing failed: \(error)")
-            throw AntigravityOAuthCredentialsError.decodeFailed("Failed to parse protobuf: \(error)")
         }
+        return nil
+    }
+
+    mutating func next() -> Field? {
+        guard let tag = self.readVarint() else { return nil }
+        let fieldNumber = Int(tag >> 3)
+        let wireType = Int(tag & 0x7)
+        switch wireType {
+        case 0:
+            guard let value = self.readVarint() else { return nil }
+            return .varint(fieldNumber: fieldNumber, value: value)
+        case 1:
+            guard let value = self.readFixed64() else { return nil }
+            return .fixed64(fieldNumber: fieldNumber, value: value)
+        case 2:
+            guard let length = self.readVarint() else { return nil }
+            let end = self.offset + Int(length)
+            guard end <= self.data.count else { return nil }
+            let slice = self.data.subdata(in: self.data.startIndex + self.offset ..< self.data.startIndex + end)
+            self.offset = end
+            return .lengthDelimited(fieldNumber: fieldNumber, value: slice)
+        case 5:
+            guard let value = self.readFixed32() else { return nil }
+            return .fixed32(fieldNumber: fieldNumber, value: value)
+        default:
+            return nil
+        }
+    }
+
+    private mutating func readVarint() -> UInt64? {
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
+        while self.offset < self.data.count {
+            let byte = self.data[self.data.startIndex + self.offset]
+            self.offset += 1
+            result |= UInt64(byte & 0x7F) << shift
+            if byte & 0x80 == 0 { return result }
+            shift += 7
+            if shift >= 64 { return nil }
+        }
+        return nil
+    }
+
+    private mutating func readFixed64() -> UInt64? {
+        guard self.offset + 8 <= self.data.count else { return nil }
+        var value: UInt64 = 0
+        for i in 0 ..< 8 {
+            value |= UInt64(self.data[self.data.startIndex + self.offset + i]) << (8 * i)
+        }
+        self.offset += 8
+        return value
+    }
+
+    private mutating func readFixed32() -> UInt32? {
+        guard self.offset + 4 <= self.data.count else { return nil }
+        var value: UInt32 = 0
+        for i in 0 ..< 4 {
+            value |= UInt32(self.data[self.data.startIndex + self.offset + i]) << (8 * i)
+        }
+        self.offset += 4
+        return value
     }
 }
 #endif
