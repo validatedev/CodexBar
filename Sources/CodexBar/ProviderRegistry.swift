@@ -25,7 +25,8 @@ struct ProviderRegistry {
         claudeFetcher: any ClaudeUsageFetching,
         browserDetection: BrowserDetection,
         onAntigravityCredentialsRefreshed:
-        (@Sendable (String, AntigravityOAuthCredentials) -> Void)? = nil) -> [UsageProvider: ProviderSpec]
+        (@Sendable (String, AntigravityOAuthCredentials) -> Void)? = nil,
+        environmentBase: [String: String] = ProcessInfo.processInfo.environment) -> [UsageProvider: ProviderSpec]
     {
         var specs: [UsageProvider: ProviderSpec] = [:]
         specs.reserveCapacity(UsageProvider.allCases.count)
@@ -43,7 +44,7 @@ struct ProviderRegistry {
                         ?? .auto
                     let snapshot = Self.makeSettingsSnapshot(settings: settings, tokenOverride: nil)
                     let env = Self.makeEnvironment(
-                        base: ProcessInfo.processInfo.environment,
+                        base: environmentBase,
                         provider: provider,
                         settings: settings,
                         tokenOverride: nil)
